@@ -3,11 +3,22 @@ updates:
   - package-ecosystem: cargo
     directory: /
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
       time: "08:00"
       timezone: Africa/Lagos
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
+    groups:
+      security-rust-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
+      routine-rust-updates:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
     labels:
       - dependencies
       - cli
@@ -17,22 +28,36 @@ updates:
   - package-ecosystem: npm
     directory: /
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
       time: "08:00"
       timezone: Africa/Lagos
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     labels:
       - dependencies
       - website
     groups:
+      security-npm-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
       react:
+        applies-to: version-updates
         patterns:
           - react
           - react-dom
           - react-server-dom-webpack
           - "@types/react"
           - "@types/react-dom"
+        update-types:
+          - minor
+          - patch
+      routine-npm-updates:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
     ignore:
       # ESLint 10 is not yet supported by eslint-plugin-react or
       # eslint-plugin-jsx-a11y. Keep the core packages aligned on v9 until the
@@ -49,11 +74,22 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
       time: "08:00"
       timezone: Africa/Lagos
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
+    groups:
+      security-action-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
+      routine-action-updates:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
     labels:
       - dependencies
       - ci

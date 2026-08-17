@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "id": "openai:usage:2026-08-17:project-a",
+  "provider": "openai",
+  "model": "gpt-5",
+  "project": "project-a",
+  "time_range": {
+    "start": "2026-08-17T00:00:00Z",
+    "end": "2026-08-18T00:00:00Z"
+  },
+  "quantities": [
+    { "kind": "input_tokens", "amount": "1250" },
+    { "kind": "output_tokens", "amount": "320" },
+    { "kind": "requests", "amount": "4" }
+  ],
+  "cost": {
+    "evidence": "reported",
+    "amount": "0.03125",
+    "currency": "USD"
+  },
+  "source": {
+    "kind": "provider_api",
+    "operation": "organization_usage"
+  },
+  "collected_at": "2026-08-18T00:05:00Z"
+}

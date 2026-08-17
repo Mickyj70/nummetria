@@ -1,0 +1,31 @@
+name: Pull request title
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  conventional-title:
+    name: Conventional title
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        shell: bash
+        run: |
+          pattern='^(feat|fix|docs|chore|refactor|test|ci|build|perf|revert)(\([a-z0-9._-]+\))?!?: .+'
+          if [[ ! "$PR_TITLE" =~ $pattern ]]; then
+            echo "Pull request titles must use Conventional Commit syntax."
+            echo "Example: feat(cli): add status command"
+            exit 1
+          fi

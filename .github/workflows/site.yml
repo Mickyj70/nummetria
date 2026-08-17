@@ -2,18 +2,6 @@ name: Website
 
 on:
   pull_request:
-    paths:
-      - "app/**"
-      - "build/**"
-      - "db/**"
-      - "examples/**"
-      - "public/**"
-      - "tests/**"
-      - "*.json"
-      - "*.mjs"
-      - "*.ts"
-      - "*.tsx"
-      - ".github/workflows/site.yml"
   push:
     branches:
       - main

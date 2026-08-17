@@ -7,7 +7,7 @@ a focused pull request with tests and documentation.
 
 - [x] Initial product website.
 - [ ] Repository foundation and open-source policies.
-- [ ] Rust workspace and command skeleton.
+- [x] Rust workspace and command skeleton.
 - [ ] Provider-neutral domain model and versioned schemas.
 - [ ] SQLite storage, migrations, deduplication, and checkpoints.
 - [ ] JSON import plus JSON and CSV export.

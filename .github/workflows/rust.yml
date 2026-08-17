@@ -1,0 +1,64 @@
+name: Rust
+
+on:
+  pull_request:
+    paths:
+      - "apps/**"
+      - "crates/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - "rustfmt.toml"
+      - ".github/workflows/rust.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/**"
+      - "crates/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - "rustfmt.toml"
+      - ".github/workflows/rust.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+          - windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+
+      - name: Select stable Rust
+        run: rustup default stable
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Check lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Check CLI binary
+        run: cargo run --quiet --bin nummetria -- --version

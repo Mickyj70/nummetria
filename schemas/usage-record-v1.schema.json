@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nummetria.dev/schemas/usage-record-v1.schema.json",
+  "title": "Nummetria Usage Record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "provider",
+    "model",
+    "project",
+    "time_range",
+    "quantities",
+    "cost",
+    "source",
+    "collected_at"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "id": { "$ref": "#/$defs/nonEmptyString" },
+    "provider": { "$ref": "#/$defs/nonEmptyString" },
+    "model": { "oneOf": [{ "$ref": "#/$defs/nonEmptyString" }, { "type": "null" }] },
+    "project": { "oneOf": [{ "$ref": "#/$defs/nonEmptyString" }, { "type": "null" }] },
+    "time_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "type": "string", "format": "date-time" },
+        "end": { "type": "string", "format": "date-time" }
+      }
+    },
+    "quantities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "amount"],
+        "properties": {
+          "kind": {
+            "enum": [
+              "input_tokens",
+              "output_tokens",
+              "cached_tokens",
+              "cache_write_tokens",
+              "reasoning_tokens",
+              "requests",
+              "images",
+              "audio_seconds",
+              "video_seconds",
+              "tool_calls",
+              "web_searches",
+              "compute_seconds"
+            ]
+          },
+          "amount": { "$ref": "#/$defs/nonNegativeDecimal" }
+        }
+      }
+    },
+    "cost": { "$ref": "#/$defs/cost" },
+    "source": { "$ref": "#/$defs/collectionSource" },
+    "collected_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "nonEmptyString": { "type": "string", "minLength": 1 },
+    "nonNegativeDecimal": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?$" },
+    "cost": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["evidence", "amount", "currency"],
+          "properties": {
+            "evidence": { "const": "reported" },
+            "amount": { "type": "string", "pattern": "^-?[0-9]+(\\.[0-9]+)?$" },
+            "currency": { "type": "string", "pattern": "^[A-Z]{3}$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["evidence", "amount", "currency", "pricing_reference"],
+          "properties": {
+            "evidence": { "enum": ["calculated", "estimated"] },
+            "amount": { "type": "string", "pattern": "^-?[0-9]+(\\.[0-9]+)?$" },
+            "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+            "pricing_reference": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["evidence"],
+          "properties": { "evidence": { "const": "unknown" } }
+        }
+      ]
+    },
+    "collectionSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "operation"],
+          "properties": {
+            "kind": { "const": "provider_api" },
+            "operation": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "format", "source_name"],
+          "properties": {
+            "kind": { "const": "import" },
+            "format": { "type": "string", "minLength": 1 },
+            "source_name": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    }
+  }
+}

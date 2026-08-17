@@ -1,4 +1,4 @@
-# Data model direction
+# Data model
 
 The domain model is provider-neutral while preserving enough source evidence to
 audit how a number was produced.
@@ -24,5 +24,12 @@ audit how a number was produced.
 - Provider payloads are not stored as an escape hatch for missing modeling.
 - Exchange formats carry a schema version.
 
-Exact serialized shapes will be added with the core-domain implementation and
-published under `schemas/`.
+The first public exchange shape is
+[`usage-record-v1.schema.json`](../schemas/usage-record-v1.schema.json). Decimal
+amounts are serialized as strings so JSON consumers never lose precision to
+binary floating-point conversion. A sanitized valid example lives under
+`fixtures/usage/` and is parsed by the core test suite.
+
+Rust constructors and deserialization enforce the same invariants. Invalid
+identifiers, reversed time ranges, negative quantities, empty quantity lists,
+and unsupported schema versions cannot become `UsageRecord` values.

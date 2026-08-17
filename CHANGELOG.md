@@ -16,3 +16,5 @@ releases begin.
 - Open-source contribution, governance, conduct, security, and licensing
   policies.
 - Rust workspace, cross-platform CLI command skeleton, and macOS/Windows CI.
+- Provider-neutral usage records, decimal money, explicit cost evidence, and a
+  versioned JSON Schema.

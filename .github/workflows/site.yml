@@ -1,0 +1,63 @@
+name: Website
+
+on:
+  pull_request:
+    paths:
+      - "app/**"
+      - "build/**"
+      - "db/**"
+      - "examples/**"
+      - "public/**"
+      - "tests/**"
+      - "*.json"
+      - "*.mjs"
+      - "*.ts"
+      - "*.tsx"
+      - ".github/workflows/site.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "app/**"
+      - "build/**"
+      - "db/**"
+      - "examples/**"
+      - "public/**"
+      - "tests/**"
+      - "*.json"
+      - "*.mjs"
+      - "*.ts"
+      - "*.tsx"
+      - ".github/workflows/site.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: website-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test production output
+        run: npm test

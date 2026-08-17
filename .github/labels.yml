@@ -1,0 +1,48 @@
+- name: bug
+  color: d73a4a
+  description: Something is not working as intended.
+- name: enhancement
+  color: a2eeef
+  description: A proposed product improvement.
+- name: documentation
+  color: 0075ca
+  description: Documentation or learning material.
+- name: good first issue
+  color: 7057ff
+  description: Approachable for a first contribution.
+- name: help wanted
+  color: 008672
+  description: Maintainers welcome contributor help.
+- name: privacy
+  color: b60205
+  description: Privacy boundary or sensitive-data handling.
+- name: security
+  color: 8b0000
+  description: Security hardening with no undisclosed vulnerability details.
+- name: cli
+  color: 1d76db
+  description: Command-line interface or terminal output.
+- name: provider
+  color: 5319e7
+  description: AI provider adapter or collection behavior.
+- name: storage
+  color: c2e0c6
+  description: SQLite, migrations, import, or export.
+- name: website
+  color: fbca04
+  description: Product website.
+- name: windows
+  color: 0052cc
+  description: Windows-specific behavior.
+- name: macos
+  color: 6f42c1
+  description: macOS-specific behavior.
+- name: dependencies
+  color: 0366d6
+  description: Dependency updates.
+- name: ci
+  color: 0e8a16
+  description: Continuous integration and release automation.
+- name: breaking change
+  color: b60205
+  description: Requires a documented compatibility decision.

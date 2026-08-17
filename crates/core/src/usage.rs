@@ -176,7 +176,7 @@ impl UsageQuantity {
 }
 
 /// Describes how strongly Nummetria can support a cost value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CostEvidence {
     Reported,

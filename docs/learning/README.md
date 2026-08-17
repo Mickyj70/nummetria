@@ -1,0 +1,17 @@
+# Learning notes
+
+Nummetria is also a teaching project. Learning notes explain concepts that are
+useful beyond a single pull request: Rust workspace design, command contracts,
+SQLite migrations, provider adapters, secure secret handling, testing, and
+cross-platform releases.
+
+Notes use numbered filenames and follow this outline:
+
+1. What problem are we solving?
+2. What concept should you understand first?
+3. How does Nummetria apply it?
+4. Which trade-offs did we accept?
+5. What experiment can you run yourself?
+
+Pull requests should link a learning note when they introduce a substantial new
+concept. Small changes can teach directly through the PR description instead.

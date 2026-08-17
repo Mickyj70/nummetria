@@ -5,8 +5,9 @@ you use AI services. It brings usage, requests, tokens, costs, and budgets from
 multiple providers into one private, consistent view.
 
 > [!IMPORTANT]
-> Nummetria is in early development. The landing page exists, but the CLI is not
-> ready to install yet. Follow the [v0.1 roadmap](ROADMAP.md) to track progress.
+> Nummetria is in early development. The CLI command skeleton is available to
+> contributors, but it is not ready for general installation. Follow the
+> [v0.1 roadmap](ROADMAP.md) to track progress.
 
 ## Why Nummetria?
 
@@ -47,17 +48,31 @@ live under `apps/` and `crates/`.
 nummetria/
 ├── app/                 # Product website
 ├── public/              # Website assets
-├── apps/cli/            # Cross-platform CLI (planned)
-├── crates/              # Reusable Rust libraries (planned)
+├── apps/cli/            # Cross-platform CLI binary and presentation
+├── crates/              # Core, storage, platform, and provider libraries
 ├── schemas/             # Versioned exchange formats (planned)
 ├── fixtures/            # Sanitized test data (planned)
 └── docs/                # Product and engineering documentation
 ```
 
-## Website development
+## Development
 
-The current repository contains the product website. Until the Rust workspace
-lands, these are the available development commands:
+Install Node.js 22.13 or newer and the current stable Rust toolchain. The
+repository pins the required Rust formatting and lint components.
+
+### CLI
+
+```bash
+cargo run --bin nummetria -- --help
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+All public v0.1 command names appear in help. Except for version output, command
+behavior intentionally remains unavailable until its focused feature lands.
+
+### Website
 
 ```bash
 npm install
@@ -65,8 +80,6 @@ npm run dev
 npm run lint
 npm test
 ```
-
-Node.js 22.13 or newer is required.
 
 ## Project principles
 

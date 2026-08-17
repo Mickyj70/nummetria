@@ -15,3 +15,4 @@ releases begin.
   documentation.
 - Open-source contribution, governance, conduct, security, and licensing
   policies.
+- Rust workspace, cross-platform CLI command skeleton, and macOS/Windows CI.

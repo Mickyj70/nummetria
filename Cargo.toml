@@ -1,0 +1,23 @@
+[workspace]
+members = [
+    "apps/cli",
+    "crates/core",
+    "crates/platform",
+    "crates/providers",
+    "crates/storage",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/Mickyj70/nummetria"
+rust-version = "1.85"
+
+[workspace.dependencies]
+clap = { version = "4.5.47", features = ["derive"] }
+nummetria-core = { path = "crates/core" }
+nummetria-platform = { path = "crates/platform" }
+nummetria-providers = { path = "crates/providers" }
+nummetria-storage = { path = "crates/storage" }

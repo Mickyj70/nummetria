@@ -46,7 +46,17 @@ A pull request must explain:
 Keep documentation and tests in the same pull request as behavior. Avoid mixing
 unrelated refactors with a feature or fix.
 
-## Local website checks
+## Local checks
+
+For Rust changes:
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+For website changes:
 
 ```bash
 npm install
@@ -54,8 +64,8 @@ npm run lint
 npm test
 ```
 
-Rust setup and checks will be added when the CLI workspace lands. Until then,
-do not invent a parallel project layout outside the documented monorepo shape.
+Run both groups when a change crosses the website and CLI boundary. Pull request
+titles must also use Conventional Commit syntax.
 
 ## Review expectations
 

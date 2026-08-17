@@ -1,0 +1,16 @@
+[package]
+name = "nummetria-cli"
+description = "Local-first AI usage and cost tracking CLI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "nummetria"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+nummetria-core.workspace = true

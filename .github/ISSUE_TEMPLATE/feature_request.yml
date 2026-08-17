@@ -1,0 +1,47 @@
+name: Feature request
+description: Propose a focused improvement that fits Nummetria's principles.
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: checkboxes
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and the roadmap.
+          required: true
+        - label: I checked the current v0.1 scope.
+          required: true
+  - type: textarea
+    attributes:
+      label: Problem
+      description: What user problem should Nummetria solve?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Proposed outcome
+      description: Describe successful behavior without prescribing unnecessary implementation details.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Alternatives considered
+      description: How do users handle this today?
+  - type: dropdown
+    attributes:
+      label: Area
+      options:
+        - CLI experience
+        - Provider integration
+        - Storage or data model
+        - Privacy or security
+        - Documentation or learning
+        - Website
+        - Future desktop experience
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Learning value
+      description: Is there a concept this change could teach contributors?

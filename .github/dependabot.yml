@@ -25,6 +25,16 @@ updates:
     labels:
       - dependencies
       - website
+    ignore:
+      # ESLint 10 is not yet supported by eslint-plugin-react or
+      # eslint-plugin-jsx-a11y. Keep the core packages aligned on v9 until the
+      # complete lint stack declares compatibility.
+      - dependency-name: "@eslint/js"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: eslint
+        update-types:
+          - "version-update:semver-major"
     commit-message:
       prefix: "chore(deps)"
 

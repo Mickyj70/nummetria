@@ -6,10 +6,10 @@ a focused pull request with tests and documentation.
 ## v0.1 — CLI foundation
 
 - [x] Initial product website.
-- [ ] Repository foundation and open-source policies.
+- [x] Repository foundation and open-source policies.
 - [x] Rust workspace and command skeleton.
 - [x] Provider-neutral domain model and versioned schemas.
-- [ ] SQLite storage, migrations, deduplication, and checkpoints.
+- [x] SQLite storage, migrations, deduplication, and checkpoints.
 - [ ] JSON import plus JSON and CSV export.
 - [ ] Cross-platform configuration and native credential storage.
 - [ ] OpenAI provider adapter.

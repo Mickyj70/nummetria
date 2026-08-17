@@ -25,6 +25,14 @@ updates:
     labels:
       - dependencies
       - website
+    groups:
+      react:
+        patterns:
+          - react
+          - react-dom
+          - react-server-dom-webpack
+          - "@types/react"
+          - "@types/react-dom"
     ignore:
       # ESLint 10 is not yet supported by eslint-plugin-react or
       # eslint-plugin-jsx-a11y. Keep the core packages aligned on v9 until the

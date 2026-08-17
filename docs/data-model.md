@@ -33,3 +33,23 @@ binary floating-point conversion. A sanitized valid example lives under
 Rust constructors and deserialization enforce the same invariants. Invalid
 identifiers, reversed time ranges, negative quantities, empty quantity lists,
 and unsupported schema versions cannot become `UsageRecord` values.
+
+## SQLite representation
+
+SQLite stores the validated versioned record as its canonical JSON payload and
+also projects the fields needed for filtering, aggregation, and constraints.
+The first migration creates:
+
+- `usage_records` for identity, provider/model/project dimensions, UTC time
+  bounds, cost evidence, decimal cost text, and the canonical payload;
+- `usage_quantities` for ordered, typed decimal quantities; and
+- `collection_checkpoints` for provider pagination cursors.
+
+Decimal values remain text rather than SQLite floating-point values. UTC
+timestamps use one fixed RFC 3339 nanosecond format so lexical ordering matches
+chronological ordering. Foreign keys cascade quantity deletion when a usage
+record is removed.
+
+Indexes correspond to the current query contract: time overlap plus optional
+provider, model, or project filters. Future indexes must be justified by a real
+query and its `EXPLAIN QUERY PLAN` output rather than added speculatively.

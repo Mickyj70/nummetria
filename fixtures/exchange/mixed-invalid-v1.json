@@ -1,0 +1,42 @@
+{
+  "format_version": 1,
+  "records": [
+    {
+      "schema_version": 1,
+      "id": "openai:valid",
+      "provider": "openai",
+      "model": null,
+      "project": null,
+      "time_range": {
+        "start": "2026-08-17T00:00:00Z",
+        "end": "2026-08-18T00:00:00Z"
+      },
+      "quantities": [{ "kind": "requests", "amount": "1" }],
+      "cost": { "evidence": "unknown" },
+      "source": {
+        "kind": "import",
+        "format": "nummetria_usage_exchange_v1",
+        "source_name": "mixed-invalid-v1.json"
+      },
+      "collected_at": "2026-08-18T00:05:00Z"
+    },
+    {
+      "schema_version": 1,
+      "id": "missing-provider",
+      "model": null,
+      "project": null,
+      "time_range": {
+        "start": "2026-08-18T00:00:00Z",
+        "end": "2026-08-19T00:00:00Z"
+      },
+      "quantities": [],
+      "cost": { "evidence": "unknown" },
+      "source": {
+        "kind": "import",
+        "format": "nummetria_usage_exchange_v1",
+        "source_name": "mixed-invalid-v1.json"
+      },
+      "collected_at": "2026-08-19T00:05:00Z"
+    }
+  ]
+}

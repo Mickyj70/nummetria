@@ -15,3 +15,10 @@ Notes use numbered filenames and follow this outline:
 
 Pull requests should link a learning note when they introduce a substantial new
 concept. Small changes can teach directly through the PR description instead.
+
+## Notes
+
+1. [Rust workspace boundaries](001-rust-workspace.md)
+2. [Domain invariants](002-domain-invariants.md)
+3. [Safe SQLite persistence](003-sqlite-storage.md)
+4. [A trustworthy import pipeline](004-import-pipeline.md)

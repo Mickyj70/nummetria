@@ -103,6 +103,7 @@ pub struct TimeRange {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawTimeRange {
     start: DateTime<Utc>,
     end: DateTime<Utc>,
@@ -152,6 +153,7 @@ pub struct UsageQuantity {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawUsageQuantity {
     kind: UsageKind,
     #[serde(with = "rust_decimal::serde::str")]
@@ -186,7 +188,7 @@ pub enum CostEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "evidence")]
+#[serde(rename_all = "snake_case", tag = "evidence", deny_unknown_fields)]
 pub enum Cost {
     Reported {
         #[serde(with = "rust_decimal::serde::str")]
@@ -221,7 +223,7 @@ impl Cost {
 
 /// Identifies the path through which a record entered Nummetria.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum CollectionSource {
     ProviderApi { operation: String },
     Import { format: String, source_name: String },
@@ -243,6 +245,7 @@ pub struct UsageRecord {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawUsageRecord {
     schema_version: u16,
     id: RecordId,

@@ -58,3 +58,10 @@ nummetria
 - `doctor` diagnoses installation, storage, and provider health.
 - `completion` generates shell completion scripts.
 - `version` prints version and build information.
+
+## Implemented local-data contract
+
+The v0.1 JSON exchange, atomic import behavior, initial `status` and `usage`
+read-back, export formats, output envelopes, and exit codes are defined in
+[Import and export](import-export.md). These behaviors are compatibility
+contracts from the first implementation onward.

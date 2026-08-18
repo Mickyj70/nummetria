@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nummetria.dev/schemas/usage-exchange-v1.schema.json",
+  "title": "Nummetria Usage Exchange v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format_version", "records"],
+  "properties": {
+    "format_version": { "const": 1 },
+    "records": {
+      "type": "array",
+      "items": { "$ref": "usage-record-v1.schema.json" }
+    }
+  }
+}

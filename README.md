@@ -5,9 +5,9 @@ you use AI services. It brings usage, requests, tokens, costs, and budgets from
 multiple providers into one private, consistent view.
 
 > [!IMPORTANT]
-> Nummetria is in early development. The CLI command skeleton is available to
-> contributors, but it is not ready for general installation. Follow the
-> [v0.1 roadmap](ROADMAP.md) to track progress.
+> Nummetria is in early development. Local JSON import, SQLite read-back, and
+> JSON/CSV export are available to contributors, but the CLI is not ready for
+> general installation. Follow the [v0.1 roadmap](ROADMAP.md) to track progress.
 
 ## Why Nummetria?
 
@@ -50,8 +50,8 @@ nummetria/
 ├── public/              # Website assets
 ├── apps/cli/            # Cross-platform CLI binary and presentation
 ├── crates/              # Core, storage, platform, and provider libraries
-├── schemas/             # Versioned exchange formats (planned)
-├── fixtures/            # Sanitized test data (planned)
+├── schemas/             # Versioned exchange formats
+├── fixtures/            # Sanitized test data
 └── docs/                # Product and engineering documentation
 ```
 
@@ -64,13 +64,17 @@ repository pins the required Rust formatting and lint components.
 
 ```bash
 cargo run --bin nummetria -- --help
+cargo run --bin nummetria -- import fixtures/exchange/valid-v1.json --dry-run
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-All public v0.1 command names appear in help. Except for version output, command
-behavior intentionally remains unavailable until its focused feature lands.
+All public v0.1 command names appear in help. Import, status, usage, export, and
+version now work; the remaining commands intentionally stay unavailable until
+their focused feature branches land. Import, status, usage, and export require
+an explicit `--database` path until platform configuration is implemented,
+except that validation-only imports do not open a database.
 
 ### Website
 

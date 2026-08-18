@@ -2,11 +2,13 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{ArgAction, CommandFactory, Parser, Subcommand};
+use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use nummetria_core::{
-    Cost, CostEvidence, ExchangeError, RecordValidationError, UsageExchange, UsageKind, UsageRecord,
+    CollectionSource, Cost, CostEvidence, ExchangeError, RecordValidationError, UsageExchange,
+    UsageKind, UsageRecord,
 };
 use nummetria_storage::{SqliteStorage, UsageAggregate, UsageQuery};
+use rust_decimal::Decimal;
 use serde::Serialize;
 
 const OUTPUT_VERSION: u16 = 1;
@@ -70,6 +72,32 @@ pub struct ImportArgs {
     pub dry_run: bool,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ExportFormat {
+    Json,
+    Csv,
+}
+
+impl ExportFormat {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Csv => "csv",
+        }
+    }
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ExportArgs {
+    /// Output representation.
+    #[arg(long, value_enum)]
+    pub format: ExportFormat,
+
+    /// Write to a new file instead of standard output.
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
+}
+
 /// Public v0.1 command groups.
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -88,7 +116,7 @@ pub enum Command {
     /// Validate and store an exchange file.
     Import(ImportArgs),
     /// Export normalized usage as JSON or CSV.
-    Export,
+    Export(ExportArgs),
     /// Inspect and change non-secret configuration.
     Config,
     /// Inspect paths, back up, or deliberately delete local data.
@@ -159,6 +187,45 @@ struct UsageOutput<'a> {
     records: &'a [UsageRecord],
 }
 
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct ExportSummary {
+    records_exported: usize,
+    format: &'static str,
+    output: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CsvRecord {
+    schema_version: u16,
+    id: String,
+    provider: String,
+    model: String,
+    project: String,
+    period_start: String,
+    period_end: String,
+    collected_at: String,
+    cost_evidence: &'static str,
+    cost_amount: String,
+    cost_currency: String,
+    pricing_reference: String,
+    source_kind: &'static str,
+    source_operation: String,
+    source_format: String,
+    source_name: String,
+    input_tokens: String,
+    output_tokens: String,
+    cached_tokens: String,
+    cache_write_tokens: String,
+    reasoning_tokens: String,
+    requests: String,
+    images: String,
+    audio_seconds: String,
+    video_seconds: String,
+    tool_calls: String,
+    web_searches: String,
+    compute_seconds: String,
+}
+
 struct CliFailure {
     exit_code: u8,
     code: &'static str,
@@ -198,6 +265,7 @@ fn run_with_io(cli: Cli, stdout: &mut dyn Write, stderr: &mut dyn Write) -> Exit
         Command::Import(args) => run_import(&cli.global, args, stdout, stderr),
         Command::Status => run_status(&cli.global, stdout),
         Command::Usage => run_usage(&cli.global, stdout),
+        Command::Export(args) => run_export(&cli.global, args, stdout),
         _ => Err(CliFailure::new(
             EXIT_INVALID_INPUT,
             "not_implemented",
@@ -212,6 +280,193 @@ fn run_with_io(cli: Cli, stdout: &mut dyn Write, stderr: &mut dyn Write) -> Exit
             ExitCode::from(failure.exit_code)
         }
     }
+}
+
+fn run_export(
+    global: &GlobalOptions,
+    args: &ExportArgs,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    let storage = open_database(global, "export")?;
+    let records = storage
+        .query_usage(&UsageQuery::default())
+        .map_err(storage_failure)?;
+    let bytes = match args.format {
+        ExportFormat::Json => {
+            let mut bytes = serde_json::to_vec_pretty(&UsageExchange::new(records.clone()))
+                .map_err(serialization_failure)?;
+            bytes.push(b'\n');
+            bytes
+        }
+        ExportFormat::Csv => render_csv(&records)?,
+    };
+
+    if let Some(path) = &args.output {
+        write_new_file(path, &bytes)?;
+        let summary = ExportSummary {
+            records_exported: records.len(),
+            format: args.format.name(),
+            output: path.display().to_string(),
+        };
+        if global.json {
+            render_json_success("export", summary, Vec::new(), stdout)
+        } else if global.quiet {
+            Ok(())
+        } else {
+            writeln!(
+                stdout,
+                "Exported {} record(s) as {} to {}.",
+                records.len(),
+                args.format.name(),
+                path.display()
+            )
+            .map_err(output_failure)
+        }
+    } else {
+        stdout.write_all(&bytes).map_err(output_failure)
+    }
+}
+
+fn render_csv(records: &[UsageRecord]) -> Result<Vec<u8>, CliFailure> {
+    let mut writer = csv::Writer::from_writer(Vec::new());
+    for record in records {
+        writer
+            .serialize(csv_record(record))
+            .map_err(|error| serialization_failure(error.to_string()))?;
+    }
+    writer.flush().map_err(output_failure)?;
+    writer
+        .into_inner()
+        .map_err(|error| output_failure(error.into_error()))
+}
+
+fn csv_record(record: &UsageRecord) -> CsvRecord {
+    let (cost_evidence, cost_amount, cost_currency, pricing_reference) = match &record.cost {
+        Cost::Reported { amount, currency } => (
+            "reported",
+            amount.to_string(),
+            currency.as_str().to_owned(),
+            String::new(),
+        ),
+        Cost::Calculated {
+            amount,
+            currency,
+            pricing_reference,
+        } => (
+            "calculated",
+            amount.to_string(),
+            currency.as_str().to_owned(),
+            pricing_reference.clone(),
+        ),
+        Cost::Estimated {
+            amount,
+            currency,
+            pricing_reference,
+        } => (
+            "estimated",
+            amount.to_string(),
+            currency.as_str().to_owned(),
+            pricing_reference.clone(),
+        ),
+        Cost::Unknown => ("unknown", String::new(), String::new(), String::new()),
+    };
+    let (source_kind, source_operation, source_format, source_name) = match &record.source {
+        CollectionSource::ProviderApi { operation } => (
+            "provider_api",
+            operation.clone(),
+            String::new(),
+            String::new(),
+        ),
+        CollectionSource::Import {
+            format,
+            source_name,
+        } => ("import", String::new(), format.clone(), source_name.clone()),
+    };
+
+    CsvRecord {
+        schema_version: record.schema_version,
+        id: record.id.as_str().to_owned(),
+        provider: record.provider.as_str().to_owned(),
+        model: record
+            .model
+            .as_ref()
+            .map_or_else(String::new, |value| value.as_str().to_owned()),
+        project: record
+            .project
+            .as_ref()
+            .map_or_else(String::new, |value| value.as_str().to_owned()),
+        period_start: record.time_range.start.to_rfc3339(),
+        period_end: record.time_range.end.to_rfc3339(),
+        collected_at: record.collected_at.to_rfc3339(),
+        cost_evidence,
+        cost_amount,
+        cost_currency,
+        pricing_reference,
+        source_kind,
+        source_operation,
+        source_format,
+        source_name,
+        input_tokens: quantity_total(record, UsageKind::InputTokens),
+        output_tokens: quantity_total(record, UsageKind::OutputTokens),
+        cached_tokens: quantity_total(record, UsageKind::CachedTokens),
+        cache_write_tokens: quantity_total(record, UsageKind::CacheWriteTokens),
+        reasoning_tokens: quantity_total(record, UsageKind::ReasoningTokens),
+        requests: quantity_total(record, UsageKind::Requests),
+        images: quantity_total(record, UsageKind::Images),
+        audio_seconds: quantity_total(record, UsageKind::AudioSeconds),
+        video_seconds: quantity_total(record, UsageKind::VideoSeconds),
+        tool_calls: quantity_total(record, UsageKind::ToolCalls),
+        web_searches: quantity_total(record, UsageKind::WebSearches),
+        compute_seconds: quantity_total(record, UsageKind::ComputeSeconds),
+    }
+}
+
+fn quantity_total(record: &UsageRecord, kind: UsageKind) -> String {
+    let matching = record
+        .quantities
+        .iter()
+        .filter(|quantity| quantity.kind == kind)
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        String::new()
+    } else {
+        matching
+            .into_iter()
+            .fold(Decimal::ZERO, |total, quantity| total + quantity.amount)
+            .to_string()
+    }
+}
+
+fn write_new_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), CliFailure> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            CliFailure::new(
+                EXIT_FILE_IO,
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    "output_exists"
+                } else {
+                    "output_io"
+                },
+                format!("could not create {}: {error}", path.display()),
+            )
+        })?;
+    if let Err(error) = file.write_all(bytes).and_then(|()| file.flush()) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(output_failure(error));
+    }
+    Ok(())
+}
+
+fn serialization_failure(error: impl std::fmt::Display) -> CliFailure {
+    CliFailure::new(
+        EXIT_FILE_IO,
+        "output_io",
+        format!("could not serialize export: {error}"),
+    )
 }
 
 fn run_status(global: &GlobalOptions, stdout: &mut dyn Write) -> Result<(), CliFailure> {
@@ -530,7 +785,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Providers => "providers",
         Command::Budget => "budget",
         Command::Import(_) => "import",
-        Command::Export => "export",
+        Command::Export(_) => "export",
         Command::Config => "config",
         Command::Data => "data",
         Command::Doctor => "doctor",
@@ -577,7 +832,7 @@ mod tests {
             &["nummetria", "providers"],
             &["nummetria", "budget"],
             &["nummetria", "import", "usage.json"],
-            &["nummetria", "export"],
+            &["nummetria", "export", "--format", "json"],
             &["nummetria", "config"],
             &["nummetria", "data"],
             &["nummetria", "doctor"],
@@ -685,5 +940,94 @@ mod tests {
             usage["data"]["records"][0]["id"],
             "openai:usage:2026-08-17:project-a"
         );
+    }
+
+    #[test]
+    fn json_export_round_trips_through_import() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_database = directory.path().join("source.db");
+        let source_database = source_database.to_str().unwrap();
+        assert!(
+            run(&[
+                "nummetria",
+                "--database",
+                source_database,
+                "import",
+                "../../fixtures/exchange/valid-v1.json",
+            ])
+            .0
+        );
+
+        let (export_success, exported, export_error) = run(&[
+            "nummetria",
+            "--database",
+            source_database,
+            "export",
+            "--format",
+            "json",
+        ]);
+        assert!(export_success, "{export_error}");
+        let exchange = UsageExchange::from_json_str(&exported).unwrap();
+        assert_eq!(exchange.records.len(), 1);
+
+        let export_path = directory.path().join("export.json");
+        std::fs::write(&export_path, exported).unwrap();
+        let target_database = directory.path().join("target.db");
+        let (import_success, summary, import_error) = run(&[
+            "nummetria",
+            "--database",
+            target_database.to_str().unwrap(),
+            "import",
+            export_path.to_str().unwrap(),
+        ]);
+        assert!(import_success, "{import_error}");
+        assert!(summary.contains("1 inserted"));
+    }
+
+    #[test]
+    fn csv_export_has_one_row_per_record_and_refuses_overwrite() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("usage.db");
+        let database = database.to_str().unwrap();
+        assert!(
+            run(&[
+                "nummetria",
+                "--database",
+                database,
+                "import",
+                "../../fixtures/exchange/valid-v1.json",
+            ])
+            .0
+        );
+
+        let (success, csv, error) = run(&[
+            "nummetria",
+            "--database",
+            database,
+            "export",
+            "--format",
+            "csv",
+        ]);
+        assert!(success, "{error}");
+        let rows = csv.lines().collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].contains("input_tokens"));
+        assert!(rows[1].contains("0.03125"));
+
+        let output = directory.path().join("usage.csv");
+        std::fs::write(&output, "keep me").unwrap();
+        let (success, _, error) = run(&[
+            "nummetria",
+            "--database",
+            database,
+            "export",
+            "--format",
+            "csv",
+            "--output",
+            output.to_str().unwrap(),
+        ]);
+        assert!(!success);
+        assert!(error.contains("could not create"));
+        assert_eq!(std::fs::read_to_string(output).unwrap(), "keep me");
     }
 }

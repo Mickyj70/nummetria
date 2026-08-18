@@ -10,7 +10,7 @@ a focused pull request with tests and documentation.
 - [x] Rust workspace and command skeleton.
 - [x] Provider-neutral domain model and versioned schemas.
 - [x] SQLite storage, migrations, deduplication, and checkpoints.
-- [ ] JSON import plus JSON and CSV export.
+- [x] JSON import plus JSON and CSV export.
 - [ ] Cross-platform configuration and native credential storage.
 - [ ] OpenAI provider adapter.
 - [ ] Anthropic provider adapter.

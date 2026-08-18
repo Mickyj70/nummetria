@@ -1,7 +1,16 @@
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{ArgAction, CommandFactory, Parser, Subcommand};
+use nummetria_core::{ExchangeError, RecordValidationError, UsageExchange};
+use nummetria_storage::SqliteStorage;
+use serde::Serialize;
+
+const OUTPUT_VERSION: u16 = 1;
+const EXIT_INVALID_INPUT: u8 = 2;
+const EXIT_FILE_IO: u8 = 3;
+const EXIT_STORAGE: u8 = 4;
 
 /// Nummetria's command-line interface.
 #[derive(Debug, Parser)]
@@ -48,6 +57,17 @@ pub struct GlobalOptions {
     pub verbose: u8,
 }
 
+#[derive(Debug, clap::Args)]
+pub struct ImportArgs {
+    /// Versioned Nummetria usage exchange file.
+    #[arg(value_name = "FILE")]
+    pub file: PathBuf,
+
+    /// Validate without opening or changing a database.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
 /// Public v0.1 command groups.
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -64,7 +84,7 @@ pub enum Command {
     /// Create and check local budgets.
     Budget,
     /// Validate and store an exchange file.
-    Import,
+    Import(ImportArgs),
     /// Export normalized usage as JSON or CSV.
     Export,
     /// Inspect and change non-secret configuration.
@@ -79,27 +99,232 @@ pub enum Command {
     Version,
 }
 
-/// Parse process arguments and run the selected command.
-pub fn run() -> ExitCode {
-    run_with(Cli::parse())
+#[derive(Debug, Serialize)]
+struct OutputEnvelope<T> {
+    output_version: u16,
+    command: &'static str,
+    data: T,
+    warnings: Vec<String>,
 }
 
-fn run_with(cli: Cli) -> ExitCode {
-    match cli.command {
-        Command::Version => {
-            println!(
-                "{} {}",
-                nummetria_core::PRODUCT_NAME,
-                env!("CARGO_PKG_VERSION")
-            );
-            ExitCode::SUCCESS
+#[derive(Debug, Serialize)]
+struct ErrorEnvelope {
+    output_version: u16,
+    command: &'static str,
+    error: ErrorBody,
+}
+
+#[derive(Debug, Serialize)]
+struct ErrorBody {
+    code: &'static str,
+    message: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    details: Vec<RecordValidationError>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct ImportSummary {
+    records_read: usize,
+    records_valid: usize,
+    records_inserted: Option<usize>,
+    records_already_present: Option<usize>,
+    dry_run: bool,
+}
+
+struct CliFailure {
+    exit_code: u8,
+    code: &'static str,
+    message: String,
+    details: Vec<RecordValidationError>,
+}
+
+impl CliFailure {
+    fn new(exit_code: u8, code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            exit_code,
+            code,
+            message: message.into(),
+            details: Vec::new(),
         }
-        command => {
-            eprintln!(
-                "The '{}' command is part of the v0.1 contract but is not implemented in this build.",
-                command_name(&command)
-            );
-            ExitCode::from(2)
+    }
+}
+
+/// Parse process arguments and run the selected command.
+pub fn run() -> ExitCode {
+    let cli = Cli::parse();
+    let stdout = io::stdout();
+    let stderr = io::stderr();
+    run_with_io(cli, &mut stdout.lock(), &mut stderr.lock())
+}
+
+fn run_with_io(cli: Cli, stdout: &mut dyn Write, stderr: &mut dyn Write) -> ExitCode {
+    let command = command_name(&cli.command);
+    let result = match &cli.command {
+        Command::Version => writeln!(
+            stdout,
+            "{} {}",
+            nummetria_core::PRODUCT_NAME,
+            env!("CARGO_PKG_VERSION")
+        )
+        .map_err(output_failure),
+        Command::Import(args) => run_import(&cli.global, args, stdout, stderr),
+        _ => Err(CliFailure::new(
+            EXIT_INVALID_INPUT,
+            "not_implemented",
+            format!("the '{command}' command is part of the v0.1 contract but is not implemented"),
+        )),
+    };
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(failure) => {
+            render_failure(&cli.global, command, &failure, stderr);
+            ExitCode::from(failure.exit_code)
+        }
+    }
+}
+
+fn run_import(
+    global: &GlobalOptions,
+    args: &ImportArgs,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    let input = std::fs::read_to_string(&args.file).map_err(|error| {
+        CliFailure::new(
+            EXIT_FILE_IO,
+            "input_io",
+            format!("could not read {}: {error}", args.file.display()),
+        )
+    })?;
+    let exchange = UsageExchange::from_json_str(&input).map_err(exchange_failure)?;
+    let record_count = exchange.records.len();
+
+    if args.dry_run {
+        let warning =
+            "dry run did not open SQLite; stored duplicates and conflicts were not checked";
+        let summary = ImportSummary {
+            records_read: record_count,
+            records_valid: record_count,
+            records_inserted: None,
+            records_already_present: None,
+            dry_run: true,
+        };
+        if global.json {
+            render_json_success("import", summary, vec![warning.to_owned()], stdout)?;
+        } else {
+            if !global.quiet {
+                writeln!(
+                    stdout,
+                    "Validated {record_count} record(s); no database was opened."
+                )
+                .map_err(output_failure)?;
+            }
+            writeln!(stderr, "Warning: {warning}.").map_err(output_failure)?;
+        }
+        return Ok(());
+    }
+
+    let database = global.database.as_ref().ok_or_else(|| {
+        CliFailure::new(
+            EXIT_INVALID_INPUT,
+            "database_required",
+            "--database <PATH> is required unless import is run with --dry-run",
+        )
+    })?;
+    let mut storage = SqliteStorage::open(database).map_err(storage_failure)?;
+    let inserted = storage
+        .insert_usage_records(&exchange.records)
+        .map_err(storage_failure)?;
+    let summary = ImportSummary {
+        records_read: record_count,
+        records_valid: record_count,
+        records_inserted: Some(inserted.inserted),
+        records_already_present: Some(inserted.already_present),
+        dry_run: false,
+    };
+
+    if global.json {
+        render_json_success("import", summary, Vec::new(), stdout)
+    } else if global.quiet {
+        Ok(())
+    } else {
+        writeln!(
+            stdout,
+            "Imported {record_count} record(s): {} inserted, {} already present.",
+            inserted.inserted, inserted.already_present
+        )
+        .map_err(output_failure)
+    }
+}
+
+fn exchange_failure(error: ExchangeError) -> CliFailure {
+    match error {
+        ExchangeError::InvalidRecords(details) => CliFailure {
+            exit_code: EXIT_INVALID_INPUT,
+            code: "invalid_import",
+            message: format!("{} usage record(s) failed validation", details.len()),
+            details,
+        },
+        other => CliFailure::new(EXIT_INVALID_INPUT, "invalid_import", other.to_string()),
+    }
+}
+
+fn storage_failure(error: nummetria_storage::StorageError) -> CliFailure {
+    CliFailure::new(EXIT_STORAGE, "storage_failure", error.to_string())
+}
+
+fn output_failure(error: io::Error) -> CliFailure {
+    CliFailure::new(
+        EXIT_FILE_IO,
+        "output_io",
+        format!("could not write output: {error}"),
+    )
+}
+
+fn render_json_success<T: Serialize>(
+    command: &'static str,
+    data: T,
+    warnings: Vec<String>,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    serde_json::to_writer_pretty(
+        &mut *stdout,
+        &OutputEnvelope {
+            output_version: OUTPUT_VERSION,
+            command,
+            data,
+            warnings,
+        },
+    )
+    .map_err(|error| output_failure(io::Error::other(error)))?;
+    writeln!(stdout).map_err(output_failure)
+}
+
+fn render_failure(
+    global: &GlobalOptions,
+    command: &'static str,
+    failure: &CliFailure,
+    stderr: &mut dyn Write,
+) {
+    if global.json {
+        let _ = serde_json::to_writer_pretty(
+            &mut *stderr,
+            &ErrorEnvelope {
+                output_version: OUTPUT_VERSION,
+                command,
+                error: ErrorBody {
+                    code: failure.code,
+                    message: failure.message.clone(),
+                    details: failure.details.clone(),
+                },
+            },
+        );
+        let _ = writeln!(stderr);
+    } else {
+        let _ = writeln!(stderr, "Error: {}", failure.message);
+        for detail in &failure.details {
+            let _ = writeln!(stderr, "  {}: {}", detail.location, detail.message);
         }
     }
 }
@@ -112,7 +337,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Usage => "usage",
         Command::Providers => "providers",
         Command::Budget => "budget",
-        Command::Import => "import",
+        Command::Import(_) => "import",
         Command::Export => "export",
         Command::Config => "config",
         Command::Data => "data",
@@ -131,7 +356,19 @@ pub fn command() -> clap::Command {
 mod tests {
     use clap::Parser;
 
-    use super::{Cli, Command};
+    use super::*;
+
+    fn run(args: &[&str]) -> (bool, String, String) {
+        let cli = Cli::try_parse_from(args).unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = run_with_io(cli, &mut stdout, &mut stderr);
+        (
+            exit == ExitCode::SUCCESS,
+            String::from_utf8(stdout).unwrap(),
+            String::from_utf8(stderr).unwrap(),
+        )
+    }
 
     #[test]
     fn command_definition_is_valid() {
@@ -140,41 +377,25 @@ mod tests {
 
     #[test]
     fn parses_every_public_command() {
-        let commands = [
-            "setup",
-            "status",
-            "collect",
-            "usage",
-            "providers",
-            "budget",
-            "import",
-            "export",
-            "config",
-            "data",
-            "doctor",
-            "completion",
-            "version",
+        let command_lines: &[&[&str]] = &[
+            &["nummetria", "setup"],
+            &["nummetria", "status"],
+            &["nummetria", "collect"],
+            &["nummetria", "usage"],
+            &["nummetria", "providers"],
+            &["nummetria", "budget"],
+            &["nummetria", "import", "usage.json"],
+            &["nummetria", "export"],
+            &["nummetria", "config"],
+            &["nummetria", "data"],
+            &["nummetria", "doctor"],
+            &["nummetria", "completion"],
+            &["nummetria", "version"],
         ];
 
-        for name in commands {
-            let cli = Cli::try_parse_from(["nummetria", name])
-                .unwrap_or_else(|error| panic!("failed to parse {name}: {error}"));
-            assert!(matches!(
-                cli.command,
-                Command::Setup
-                    | Command::Status
-                    | Command::Collect
-                    | Command::Usage
-                    | Command::Providers
-                    | Command::Budget
-                    | Command::Import
-                    | Command::Export
-                    | Command::Config
-                    | Command::Data
-                    | Command::Doctor
-                    | Command::Completion
-                    | Command::Version
-            ));
+        for args in command_lines {
+            Cli::try_parse_from(*args)
+                .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
         }
     }
 
@@ -187,5 +408,58 @@ mod tests {
 
         assert!(before.global.json);
         assert!(after.global.json);
+    }
+
+    #[test]
+    fn dry_run_validates_without_a_database() {
+        let (success, stdout, stderr) = run(&[
+            "nummetria",
+            "import",
+            "../../fixtures/exchange/valid-v1.json",
+            "--dry-run",
+        ]);
+        assert!(success);
+        assert!(stdout.contains("Validated 1 record(s)"));
+        assert!(stderr.contains("stored duplicates and conflicts were not checked"));
+    }
+
+    #[test]
+    fn import_is_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("usage.db");
+        let database = database.to_str().unwrap();
+        let args = [
+            "nummetria",
+            "--database",
+            database,
+            "import",
+            "../../fixtures/exchange/valid-v1.json",
+        ];
+
+        let (first_success, first, _) = run(&args);
+        let (second_success, second, _) = run(&args);
+
+        assert!(first_success);
+        assert!(second_success);
+        assert!(first.contains("1 inserted, 0 already present"));
+        assert!(second.contains("0 inserted, 1 already present"));
+    }
+
+    #[test]
+    fn invalid_records_are_reported_together_without_opening_sqlite() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("must-not-exist.db");
+        let database_string = database.to_str().unwrap();
+        let (success, _, stderr) = run(&[
+            "nummetria",
+            "--database",
+            database_string,
+            "import",
+            "../../fixtures/exchange/mixed-invalid-v1.json",
+        ]);
+
+        assert!(!success);
+        assert!(stderr.contains("records[1]"));
+        assert!(!database.exists());
     }
 }

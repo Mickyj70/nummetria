@@ -446,6 +446,10 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "nummetria-core",
+ "nummetria-storage",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

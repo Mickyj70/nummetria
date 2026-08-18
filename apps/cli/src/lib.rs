@@ -3,8 +3,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{ArgAction, CommandFactory, Parser, Subcommand};
-use nummetria_core::{ExchangeError, RecordValidationError, UsageExchange};
-use nummetria_storage::SqliteStorage;
+use nummetria_core::{
+    Cost, CostEvidence, ExchangeError, RecordValidationError, UsageExchange, UsageKind, UsageRecord,
+};
+use nummetria_storage::{SqliteStorage, UsageAggregate, UsageQuery};
 use serde::Serialize;
 
 const OUTPUT_VERSION: u16 = 1;
@@ -131,6 +133,32 @@ struct ImportSummary {
     dry_run: bool,
 }
 
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct QuantitySummary {
+    kind: &'static str,
+    amount: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct CostSummary {
+    evidence: &'static str,
+    currency: String,
+    amount: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct StatusSummary {
+    record_count: usize,
+    quantities: Vec<QuantitySummary>,
+    costs: Vec<CostSummary>,
+    unknown_cost_record_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct UsageOutput<'a> {
+    records: &'a [UsageRecord],
+}
+
 struct CliFailure {
     exit_code: u8,
     code: &'static str,
@@ -168,6 +196,8 @@ fn run_with_io(cli: Cli, stdout: &mut dyn Write, stderr: &mut dyn Write) -> Exit
         )
         .map_err(output_failure),
         Command::Import(args) => run_import(&cli.global, args, stdout, stderr),
+        Command::Status => run_status(&cli.global, stdout),
+        Command::Usage => run_usage(&cli.global, stdout),
         _ => Err(CliFailure::new(
             EXIT_INVALID_INPUT,
             "not_implemented",
@@ -181,6 +211,168 @@ fn run_with_io(cli: Cli, stdout: &mut dyn Write, stderr: &mut dyn Write) -> Exit
             render_failure(&cli.global, command, &failure, stderr);
             ExitCode::from(failure.exit_code)
         }
+    }
+}
+
+fn run_status(global: &GlobalOptions, stdout: &mut dyn Write) -> Result<(), CliFailure> {
+    let storage = open_database(global, "status")?;
+    let aggregate = storage
+        .aggregate_usage(&UsageQuery::default())
+        .map_err(storage_failure)?;
+    let summary = status_summary(aggregate);
+
+    if global.json {
+        render_json_success("status", summary, Vec::new(), stdout)
+    } else {
+        writeln!(stdout, "Records: {}", summary.record_count).map_err(output_failure)?;
+        writeln!(stdout, "Quantities:").map_err(output_failure)?;
+        if summary.quantities.is_empty() {
+            writeln!(stdout, "  none").map_err(output_failure)?;
+        } else {
+            for quantity in &summary.quantities {
+                writeln!(stdout, "  {}: {}", quantity.kind, quantity.amount)
+                    .map_err(output_failure)?;
+            }
+        }
+        writeln!(stdout, "Costs:").map_err(output_failure)?;
+        if summary.costs.is_empty() {
+            writeln!(stdout, "  none").map_err(output_failure)?;
+        } else {
+            for cost in &summary.costs {
+                writeln!(
+                    stdout,
+                    "  {} {}: {}",
+                    cost.evidence, cost.currency, cost.amount
+                )
+                .map_err(output_failure)?;
+            }
+        }
+        writeln!(
+            stdout,
+            "Unknown-cost records: {}",
+            summary.unknown_cost_record_count
+        )
+        .map_err(output_failure)
+    }
+}
+
+fn run_usage(global: &GlobalOptions, stdout: &mut dyn Write) -> Result<(), CliFailure> {
+    let storage = open_database(global, "usage")?;
+    let records = storage
+        .query_usage(&UsageQuery::default())
+        .map_err(storage_failure)?;
+
+    if global.json {
+        render_json_success(
+            "usage",
+            UsageOutput { records: &records },
+            Vec::new(),
+            stdout,
+        )
+    } else if records.is_empty() {
+        writeln!(stdout, "No usage records found.").map_err(output_failure)
+    } else {
+        for record in &records {
+            writeln!(
+                stdout,
+                "{}..{}  {}  model={}  project={}  id={}",
+                record.time_range.start.to_rfc3339(),
+                record.time_range.end.to_rfc3339(),
+                record.provider.as_str(),
+                record.model.as_ref().map_or("-", |value| value.as_str()),
+                record.project.as_ref().map_or("-", |value| value.as_str()),
+                record.id.as_str(),
+            )
+            .map_err(output_failure)?;
+            let quantities = record
+                .quantities
+                .iter()
+                .map(|quantity| format!("{}={}", usage_kind_name(quantity.kind), quantity.amount))
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(stdout, "  usage: {quantities}").map_err(output_failure)?;
+            writeln!(stdout, "  cost: {}", human_cost(&record.cost)).map_err(output_failure)?;
+        }
+        Ok(())
+    }
+}
+
+fn open_database(
+    global: &GlobalOptions,
+    command: &'static str,
+) -> Result<SqliteStorage, CliFailure> {
+    let database = global.database.as_ref().ok_or_else(|| {
+        CliFailure::new(
+            EXIT_INVALID_INPUT,
+            "database_required",
+            format!("--database <PATH> is required for the {command} command"),
+        )
+    })?;
+    SqliteStorage::open(database).map_err(storage_failure)
+}
+
+fn status_summary(aggregate: UsageAggregate) -> StatusSummary {
+    StatusSummary {
+        record_count: aggregate.record_count,
+        quantities: aggregate
+            .quantities
+            .into_iter()
+            .map(|quantity| QuantitySummary {
+                kind: usage_kind_name(quantity.kind),
+                amount: quantity.amount.to_string(),
+            })
+            .collect(),
+        costs: aggregate
+            .costs
+            .into_iter()
+            .map(|cost| CostSummary {
+                evidence: cost_evidence_name(&cost.evidence),
+                currency: cost.currency.as_str().to_owned(),
+                amount: cost.amount.to_string(),
+            })
+            .collect(),
+        unknown_cost_record_count: aggregate.unknown_cost_record_count,
+    }
+}
+
+fn human_cost(cost: &Cost) -> String {
+    match cost {
+        Cost::Reported { amount, currency } => {
+            format!("reported {} {amount}", currency.as_str())
+        }
+        Cost::Calculated {
+            amount, currency, ..
+        } => format!("calculated {} {amount}", currency.as_str()),
+        Cost::Estimated {
+            amount, currency, ..
+        } => format!("estimated {} {amount}", currency.as_str()),
+        Cost::Unknown => "unknown".to_owned(),
+    }
+}
+
+fn cost_evidence_name(evidence: &CostEvidence) -> &'static str {
+    match evidence {
+        CostEvidence::Reported => "reported",
+        CostEvidence::Calculated => "calculated",
+        CostEvidence::Estimated => "estimated",
+        CostEvidence::Unknown => "unknown",
+    }
+}
+
+fn usage_kind_name(kind: UsageKind) -> &'static str {
+    match kind {
+        UsageKind::InputTokens => "input_tokens",
+        UsageKind::OutputTokens => "output_tokens",
+        UsageKind::CachedTokens => "cached_tokens",
+        UsageKind::CacheWriteTokens => "cache_write_tokens",
+        UsageKind::ReasoningTokens => "reasoning_tokens",
+        UsageKind::Requests => "requests",
+        UsageKind::Images => "images",
+        UsageKind::AudioSeconds => "audio_seconds",
+        UsageKind::VideoSeconds => "video_seconds",
+        UsageKind::ToolCalls => "tool_calls",
+        UsageKind::WebSearches => "web_searches",
+        UsageKind::ComputeSeconds => "compute_seconds",
     }
 }
 
@@ -461,5 +653,37 @@ mod tests {
         assert!(!success);
         assert!(stderr.contains("records[1]"));
         assert!(!database.exists());
+    }
+
+    #[test]
+    fn status_and_usage_read_back_imported_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("usage.db");
+        let database = database.to_str().unwrap();
+        let import_args = [
+            "nummetria",
+            "--database",
+            database,
+            "import",
+            "../../fixtures/exchange/valid-v1.json",
+        ];
+        assert!(run(&import_args).0);
+
+        let (status_success, status, status_error) =
+            run(&["nummetria", "--database", database, "--json", "status"]);
+        assert!(status_success, "{status_error}");
+        let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+        assert_eq!(status["data"]["record_count"], 1);
+        assert_eq!(status["data"]["quantities"][0]["amount"], "1250");
+        assert_eq!(status["data"]["costs"][0]["evidence"], "reported");
+
+        let (usage_success, usage, usage_error) =
+            run(&["nummetria", "--database", database, "--json", "usage"]);
+        assert!(usage_success, "{usage_error}");
+        let usage: serde_json::Value = serde_json::from_str(&usage).unwrap();
+        assert_eq!(
+            usage["data"]["records"][0]["id"],
+            "openai:usage:2026-08-17:project-a"
+        );
     }
 }

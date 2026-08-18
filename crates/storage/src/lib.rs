@@ -355,11 +355,13 @@ impl SqliteStorage {
 
     #[cfg(test)]
     fn row_count(&self, table: &str) -> usize {
-        self.connection
+        let count: i64 = self
+            .connection
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
                 row.get(0)
             })
-            .unwrap()
+            .unwrap();
+        usize::try_from(count).unwrap()
     }
 }
 
@@ -432,7 +434,7 @@ fn insert_record(
              VALUES (?1, ?2, ?3, ?4)",
             params![
                 record.id.as_str(),
-                position,
+                position as i64,
                 usage_kind_name(quantity.kind),
                 quantity.amount.to_string(),
             ],

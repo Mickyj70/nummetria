@@ -18,9 +18,13 @@ export can be imported without changing its identity or provenance.
 ## Import behavior
 
 ```text
-nummetria --database <PATH> import <FILE>
+nummetria import <FILE>
 nummetria import <FILE> --dry-run
 ```
+
+The database is resolved using the precedence documented in
+[Configuration, paths, and credentials](configuration.md). `--database <PATH>`
+remains available when a one-off explicit location is useful.
 
 Validation is atomic. Nummetria reads the envelope, validates every record, and
 reports all record-level failures using locations such as `records[2]`. If any
@@ -39,11 +43,11 @@ rows.
 ## Read-back and export
 
 ```text
-nummetria --database <PATH> status
-nummetria --database <PATH> usage
-nummetria --database <PATH> export --format json
-nummetria --database <PATH> export --format csv
-nummetria --database <PATH> export --format <json|csv> --output <PATH>
+nummetria status
+nummetria usage
+nummetria export --format json
+nummetria export --format csv
+nummetria export --format <json|csv> --output <PATH>
 ```
 
 `status` prints all-time quantities and costs grouped by evidence and currency.

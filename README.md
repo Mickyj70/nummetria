@@ -64,17 +64,20 @@ repository pins the required Rust formatting and lint components.
 
 ```bash
 cargo run --bin nummetria -- --help
+cargo run --bin nummetria -- setup
 cargo run --bin nummetria -- import fixtures/exchange/valid-v1.json --dry-run
+cargo run --bin nummetria -- config show
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-All public v0.1 command names appear in help. Import, status, usage, export, and
-version now work; the remaining commands intentionally stay unavailable until
-their focused feature branches land. Import, status, usage, and export require
-an explicit `--database` path until platform configuration is implemented,
-except that validation-only imports do not open a database.
+All public v0.1 command names appear in help. Setup, configuration inspection,
+local data operations, import, status, usage, export, and version now work; the
+remaining commands intentionally stay unavailable until their focused feature
+branches land. Data commands discover an operating-system-standard database by
+default. `--database`, `NUMMETRIA_DATABASE`, or TOML can select another path.
+Validation-only imports do not read configuration or open a database.
 
 ### Website
 

@@ -71,8 +71,10 @@ is read by these inspection commands.
 Backups use SQLite's consistent backup operation and refuse to overwrite an
 existing destination. Data deletion prints the resolved database target and
 requires an interactive confirmation. `--yes` is the explicit non-interactive
-confirmation. Deletion clears usage and collection checkpoints while retaining
-the schema and configuration; credentials are not deleted with usage data.
+confirmation. JSON mode requires `--yes` so a machine-readable command never
+pauses for terminal input. Deletion clears usage and collection checkpoints
+while retaining the schema and configuration; credentials are not deleted with
+usage data.
 
 ## Errors and privacy
 

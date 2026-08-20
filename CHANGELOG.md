@@ -25,3 +25,10 @@ releases begin.
 - Initial all-time `status` and normalized `usage` read-back commands.
 - Round-trip JSON export and spreadsheet-friendly CSV export with safe file
   creation.
+- Versioned TOML configuration, macOS and Windows standard path discovery, and
+  deterministic command/environment/config/default precedence.
+- Native macOS Keychain and Windows Credential Manager abstractions with
+  redacted secret values and isolated test stores.
+- Create-once setup, configuration inspection, automatic database discovery,
+  consistent backup, and deliberately confirmed data deletion commands.
+- Secret-safe configuration errors that never echo malformed file contents.

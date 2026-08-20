@@ -352,13 +352,17 @@ pub fn run() -> ExitCode {
             return ExitCode::from(failure.exit_code);
         }
     };
-    let environment = match EnvironmentOverrides::from_process() {
-        Ok(environment) => environment,
-        Err(error) => {
-            let failure = configuration_failure(error);
-            render_failure(&cli.global, command, &failure, &mut stderr);
-            return ExitCode::from(failure.exit_code);
+    let environment = if command_uses_configuration(&cli.command) {
+        match EnvironmentOverrides::from_process() {
+            Ok(environment) => environment,
+            Err(error) => {
+                let failure = configuration_failure(error);
+                render_failure(&cli.global, command, &failure, &mut stderr);
+                return ExitCode::from(failure.exit_code);
+            }
         }
+    } else {
+        EnvironmentOverrides::default()
     };
     let context = RuntimeContext { paths, environment };
     run_with_io(
@@ -1241,6 +1245,24 @@ fn command_name(command: &Command) -> &'static str {
         Command::Doctor => "doctor",
         Command::Completion => "completion",
         Command::Version => "version",
+    }
+}
+
+fn command_uses_configuration(command: &Command) -> bool {
+    match command {
+        Command::Status
+        | Command::Usage
+        | Command::Export(_)
+        | Command::Config(_)
+        | Command::Data(_) => true,
+        Command::Import(args) => !args.dry_run,
+        Command::Setup
+        | Command::Collect
+        | Command::Providers
+        | Command::Budget
+        | Command::Doctor
+        | Command::Completion
+        | Command::Version => false,
     }
 }
 

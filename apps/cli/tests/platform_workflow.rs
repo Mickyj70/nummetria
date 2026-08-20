@@ -188,4 +188,15 @@ fn invalid_configuration_is_safe_and_never_echoes_secret_values() {
         .unwrap();
     assert_eq!(empty_environment.status.code(), Some(2));
     assert!(text(&empty_environment.stderr).contains("cannot be empty"));
+
+    let dry_run = command()
+        .env("NUMMETRIA_CONFIG", "")
+        .args([
+            "import",
+            fixture("valid-v1.json").to_str().unwrap(),
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(dry_run.status.code(), Some(0), "{}", text(&dry_run.stderr));
 }

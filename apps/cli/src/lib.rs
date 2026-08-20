@@ -11,7 +11,7 @@ use nummetria_platform::{
     ConfigError, ConfigSource, EnvironmentOverrides, PlatformPaths, ResolveOptions, ResolvedConfig,
     SetupOutcome, resolve_config, write_initial_config,
 };
-use nummetria_storage::{SqliteStorage, UsageAggregate, UsageQuery};
+use nummetria_storage::{SqliteStorage, StorageError, UsageAggregate, UsageQuery};
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -267,6 +267,18 @@ struct ConfigShowSummary {
 struct DataPathSummary {
     path: String,
     source: ConfigSource,
+}
+
+#[derive(Debug, Serialize)]
+struct BackupSummary {
+    database_path: String,
+    output_path: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DeleteSummary {
+    database_path: String,
+    records_deleted: usize,
 }
 
 struct RuntimeContext {
@@ -536,7 +548,7 @@ fn run_data(
     global: &GlobalOptions,
     args: &DataArgs,
     context: &RuntimeContext,
-    _stdin: &mut dyn BufRead,
+    stdin: &mut dyn BufRead,
     stdout: &mut dyn Write,
 ) -> Result<(), CliFailure> {
     match &args.command {
@@ -552,11 +564,146 @@ fn run_data(
                 writeln!(stdout, "{}", summary.path).map_err(output_failure)
             }
         }
-        DataCommand::Backup { .. } | DataCommand::Delete { .. } => Err(CliFailure::new(
+        DataCommand::Backup { output } => run_backup(global, context, output, stdout),
+        DataCommand::Delete { all, yes } => run_delete(global, context, *all, *yes, stdin, stdout),
+    }
+}
+
+fn run_backup(
+    global: &GlobalOptions,
+    context: &RuntimeContext,
+    output: &std::path::Path,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    let resolved = resolve(global, context)?;
+    require_existing_database(&resolved.database_path)?;
+    if output.exists() {
+        return Err(CliFailure::new(
+            EXIT_FILE_IO,
+            "output_exists",
+            format!("backup destination already exists: {}", output.display()),
+        ));
+    }
+    if let Some(parent) = output.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.is_dir()
+    {
+        return Err(CliFailure::new(
+            EXIT_FILE_IO,
+            "output_io",
+            format!("backup directory does not exist: {}", parent.display()),
+        ));
+    }
+    let storage = SqliteStorage::open(&resolved.database_path).map_err(storage_failure)?;
+    storage.backup_to(output).map_err(backup_failure)?;
+    let summary = BackupSummary {
+        database_path: resolved.database_path.display().to_string(),
+        output_path: output.display().to_string(),
+    };
+
+    if global.json {
+        render_json_success("data", summary, Vec::new(), stdout)
+    } else if global.quiet {
+        Ok(())
+    } else {
+        writeln!(
+            stdout,
+            "Backed up {} to {}.",
+            summary.database_path, summary.output_path
+        )
+        .map_err(output_failure)
+    }
+}
+
+fn run_delete(
+    global: &GlobalOptions,
+    context: &RuntimeContext,
+    all: bool,
+    yes: bool,
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    if !all {
+        return Err(CliFailure::new(
             EXIT_INVALID_INPUT,
-            "not_implemented",
-            "this data operation is not implemented yet",
-        )),
+            "delete_scope_required",
+            "data delete requires --all to make the deletion scope explicit",
+        ));
+    }
+    if global.json && !yes {
+        return Err(CliFailure::new(
+            EXIT_INVALID_INPUT,
+            "confirmation_required",
+            "data delete with --json requires --yes",
+        ));
+    }
+
+    let resolved = resolve(global, context)?;
+    require_existing_database(&resolved.database_path)?;
+
+    if !yes {
+        write!(
+            stdout,
+            "Delete all usage data from {}? Type 'delete' to continue: ",
+            resolved.database_path.display()
+        )
+        .and_then(|()| stdout.flush())
+        .map_err(output_failure)?;
+        let mut confirmation = String::new();
+        stdin.read_line(&mut confirmation).map_err(|error| {
+            CliFailure::new(
+                EXIT_FILE_IO,
+                "input_io",
+                format!("could not read confirmation: {error}"),
+            )
+        })?;
+        if confirmation.trim() != "delete" {
+            return Err(CliFailure::new(
+                EXIT_INVALID_INPUT,
+                "confirmation_required",
+                "deletion cancelled; type 'delete' exactly or pass --yes",
+            ));
+        }
+    }
+
+    let mut storage = SqliteStorage::open(&resolved.database_path).map_err(storage_failure)?;
+    let records_deleted = storage
+        .aggregate_usage(&UsageQuery::default())
+        .map_err(storage_failure)?
+        .record_count;
+    storage.delete_all_data().map_err(storage_failure)?;
+    let summary = DeleteSummary {
+        database_path: resolved.database_path.display().to_string(),
+        records_deleted,
+    };
+
+    if global.json {
+        render_json_success("data", summary, Vec::new(), stdout)
+    } else if global.quiet {
+        Ok(())
+    } else {
+        writeln!(stdout, "Deleted {records_deleted} usage record(s).").map_err(output_failure)
+    }
+}
+
+fn require_existing_database(path: &std::path::Path) -> Result<(), CliFailure> {
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(CliFailure::new(
+            EXIT_STORAGE,
+            "database_missing",
+            format!("database does not exist: {}", path.display()),
+        ))
+    }
+}
+
+fn backup_failure(error: StorageError) -> CliFailure {
+    match error {
+        StorageError::BackupDestinationExists(_) => {
+            CliFailure::new(EXIT_FILE_IO, "output_exists", error.to_string())
+        }
+        other => storage_failure(other),
     }
 }
 
@@ -1115,9 +1262,18 @@ mod tests {
         paths: PlatformPaths,
         environment: EnvironmentOverrides,
     ) -> (bool, String, String) {
+        run_in_context_with_input(args, paths, environment, b"")
+    }
+
+    fn run_in_context_with_input(
+        args: &[&str],
+        paths: PlatformPaths,
+        environment: EnvironmentOverrides,
+        input: &[u8],
+    ) -> (bool, String, String) {
         let cli = Cli::try_parse_from(args).unwrap();
         let context = RuntimeContext { paths, environment };
-        let mut stdin = io::Cursor::new(Vec::<u8>::new());
+        let mut stdin = io::Cursor::new(input);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let exit = run_with_io(cli, &context, &mut stdin, &mut stdout, &mut stderr);
@@ -1297,6 +1453,103 @@ mod tests {
         );
         assert!(success, "{error}");
         assert!(output.contains("Validated 1 record(s)"));
+    }
+
+    #[test]
+    fn backup_refuses_overwrite_and_delete_requires_deliberate_confirmation() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = PlatformPaths::from_directories(
+            directory.path().join("config"),
+            directory.path().join("data"),
+        );
+        assert!(
+            run_in_context(
+                &["nummetria", "setup"],
+                paths.clone(),
+                EnvironmentOverrides::default(),
+            )
+            .0
+        );
+        assert!(
+            run_in_context(
+                &[
+                    "nummetria",
+                    "import",
+                    "../../fixtures/exchange/valid-v1.json",
+                ],
+                paths.clone(),
+                EnvironmentOverrides::default(),
+            )
+            .0
+        );
+
+        let backup = directory.path().join("backup.db");
+        let backup_arg = backup.to_str().unwrap();
+        let (success, output, error) = run_in_context(
+            &["nummetria", "data", "backup", "--output", backup_arg],
+            paths.clone(),
+            EnvironmentOverrides::default(),
+        );
+        assert!(success, "{error}");
+        assert!(output.contains("Backed up"));
+        assert!(backup.exists());
+
+        let (success, _, error) = run_in_context(
+            &["nummetria", "data", "backup", "--output", backup_arg],
+            paths.clone(),
+            EnvironmentOverrides::default(),
+        );
+        assert!(!success);
+        assert!(error.contains("already exists"));
+
+        let (success, _, error) = run_in_context_with_input(
+            &["nummetria", "data", "delete", "--all"],
+            paths.clone(),
+            EnvironmentOverrides::default(),
+            b"no\n",
+        );
+        assert!(!success);
+        assert!(error.contains("deletion cancelled"));
+
+        let (success, output, error) = run_in_context_with_input(
+            &["nummetria", "data", "delete", "--all"],
+            paths.clone(),
+            EnvironmentOverrides::default(),
+            b"delete\n",
+        );
+        assert!(success, "{error}");
+        assert!(output.contains("Deleted 1 usage record(s)"));
+
+        let storage = SqliteStorage::open(paths.database_file()).unwrap();
+        assert_eq!(
+            storage
+                .aggregate_usage(&UsageQuery::default())
+                .unwrap()
+                .record_count,
+            0
+        );
+        assert!(paths.config_file().exists());
+    }
+
+    #[test]
+    fn json_delete_requires_noninteractive_confirmation() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = PlatformPaths::from_directories(
+            directory.path().join("config"),
+            directory.path().join("data"),
+        );
+        std::fs::create_dir_all(paths.data_dir()).unwrap();
+        SqliteStorage::open(paths.database_file()).unwrap();
+
+        let (success, output, error) = run_in_context(
+            &["nummetria", "--json", "data", "delete", "--all"],
+            paths,
+            EnvironmentOverrides::default(),
+        );
+        assert!(!success);
+        assert!(output.is_empty());
+        let error: serde_json::Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(error["error"]["code"], "confirmation_required");
     }
 
     #[test]

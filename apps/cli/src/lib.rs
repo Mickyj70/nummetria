@@ -1151,6 +1151,12 @@ fn storage_failure(error: nummetria_storage::StorageError) -> CliFailure {
 }
 
 fn configuration_failure(error: ConfigError) -> CliFailure {
+    let message = match &error {
+        ConfigError::Parse { path, .. } => {
+            format!("invalid configuration file {path}; check its TOML syntax and supported fields")
+        }
+        _ => error.to_string(),
+    };
     let (exit_code, code) = match error {
         ConfigError::Read { .. }
         | ConfigError::CreateDirectory { .. }
@@ -1162,7 +1168,7 @@ fn configuration_failure(error: ConfigError) -> CliFailure {
         | ConfigError::Parse { .. }
         | ConfigError::UnsupportedVersion { .. } => (EXIT_INVALID_INPUT, "invalid_configuration"),
     };
-    CliFailure::new(exit_code, code, error.to_string())
+    CliFailure::new(exit_code, code, message)
 }
 
 fn output_failure(error: io::Error) -> CliFailure {

@@ -5,9 +5,13 @@
 
 mod config;
 mod paths;
+mod secrets;
 
 pub use config::{
     AppConfig, ConfigError, ConfigSource, EnvironmentOverrides, ResolveOptions, ResolvedConfig,
     SetupOutcome, resolve_config, write_initial_config,
 };
 pub use paths::{PathError, PlatformPaths};
+pub use secrets::{
+    CredentialId, InMemorySecretStore, KeyringSecretStore, SecretError, SecretStore, SecretValue,
+};

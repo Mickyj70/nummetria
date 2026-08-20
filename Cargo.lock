@@ -550,6 +550,7 @@ dependencies = [
  "clap",
  "csv",
  "nummetria-core",
+ "nummetria-platform",
  "nummetria-storage",
  "rust_decimal",
  "serde",

@@ -113,9 +113,15 @@ fn invalid_inputs_use_exit_two_and_never_open_sqlite() {
     assert!(text(&output.stderr).contains("unsupported usage exchange format version 2"));
     assert!(!database.exists());
 
-    let missing_database = nummetria(&["import", fixture("valid-v1.json").to_str().unwrap()]);
-    assert_eq!(missing_database.status.code(), Some(2));
-    assert!(text(&missing_database.stderr).contains("--database"));
+    let missing_config = directory.path().join("missing.toml");
+    let missing_config = nummetria(&[
+        "--config",
+        missing_config.to_str().unwrap(),
+        "import",
+        fixture("valid-v1.json").to_str().unwrap(),
+    ]);
+    assert_eq!(missing_config.status.code(), Some(2));
+    assert!(text(&missing_config.stderr).contains("does not exist"));
 }
 
 #[test]

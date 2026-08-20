@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -6,6 +6,10 @@ use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use nummetria_core::{
     CollectionSource, Cost, CostEvidence, ExchangeError, RecordValidationError, UsageExchange,
     UsageKind, UsageRecord,
+};
+use nummetria_platform::{
+    ConfigError, ConfigSource, EnvironmentOverrides, PlatformPaths, ResolveOptions, ResolvedConfig,
+    SetupOutcome, resolve_config, write_initial_config,
 };
 use nummetria_storage::{SqliteStorage, UsageAggregate, UsageQuery};
 use rust_decimal::Decimal;
@@ -98,6 +102,49 @@ pub struct ExportArgs {
     pub output: Option<PathBuf>,
 }
 
+#[derive(Debug, clap::Args)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub command: ConfigCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigCommand {
+    /// Print the selected configuration file path.
+    Path,
+    /// Show resolved non-secret configuration and its sources.
+    Show,
+    /// Validate the selected configuration without changing it.
+    Validate,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct DataArgs {
+    #[command(subcommand)]
+    pub command: DataCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DataCommand {
+    /// Print the resolved SQLite database path.
+    Path,
+    /// Copy the SQLite database to a new backup file.
+    Backup {
+        /// Destination path, which must not already exist.
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+    },
+    /// Deliberately delete all locally stored usage records.
+    Delete {
+        /// Confirm that all usage data is in scope.
+        #[arg(long)]
+        all: bool,
+        /// Skip the interactive confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
 /// Public v0.1 command groups.
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -118,9 +165,9 @@ pub enum Command {
     /// Export normalized usage as JSON or CSV.
     Export(ExportArgs),
     /// Inspect and change non-secret configuration.
-    Config,
+    Config(ConfigArgs),
     /// Inspect paths, back up, or deliberately delete local data.
-    Data,
+    Data(DataArgs),
     /// Diagnose installation, storage, and provider health.
     Doctor,
     /// Generate a shell completion script.
@@ -195,6 +242,39 @@ struct ExportSummary {
 }
 
 #[derive(Debug, Serialize)]
+struct SetupSummary {
+    config_path: String,
+    data_directory: String,
+    database_path: String,
+    config_created: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigPathSummary {
+    path: String,
+    source: ConfigSource,
+    exists: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigShowSummary {
+    config: ConfigPathSummary,
+    database_path: String,
+    database_source: ConfigSource,
+}
+
+#[derive(Debug, Serialize)]
+struct DataPathSummary {
+    path: String,
+    source: ConfigSource,
+}
+
+struct RuntimeContext {
+    paths: PlatformPaths,
+    environment: EnvironmentOverrides,
+}
+
+#[derive(Debug, Serialize)]
 struct CsvRecord {
     schema_version: u16,
     id: String,
@@ -247,12 +327,44 @@ impl CliFailure {
 /// Parse process arguments and run the selected command.
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
+    let command = command_name(&cli.command);
     let stdout = io::stdout();
     let stderr = io::stderr();
-    run_with_io(cli, &mut stdout.lock(), &mut stderr.lock())
+    let mut stdout = stdout.lock();
+    let mut stderr = stderr.lock();
+    let paths = match PlatformPaths::discover() {
+        Ok(paths) => paths,
+        Err(error) => {
+            let failure = configuration_failure(ConfigError::Paths(error));
+            render_failure(&cli.global, command, &failure, &mut stderr);
+            return ExitCode::from(failure.exit_code);
+        }
+    };
+    let environment = match EnvironmentOverrides::from_process() {
+        Ok(environment) => environment,
+        Err(error) => {
+            let failure = configuration_failure(error);
+            render_failure(&cli.global, command, &failure, &mut stderr);
+            return ExitCode::from(failure.exit_code);
+        }
+    };
+    let context = RuntimeContext { paths, environment };
+    run_with_io(
+        cli,
+        &context,
+        &mut io::stdin().lock(),
+        &mut stdout,
+        &mut stderr,
+    )
 }
 
-fn run_with_io(cli: Cli, stdout: &mut dyn Write, stderr: &mut dyn Write) -> ExitCode {
+fn run_with_io(
+    cli: Cli,
+    context: &RuntimeContext,
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> ExitCode {
     let command = command_name(&cli.command);
     let result = match &cli.command {
         Command::Version => writeln!(
@@ -262,10 +374,13 @@ fn run_with_io(cli: Cli, stdout: &mut dyn Write, stderr: &mut dyn Write) -> Exit
             env!("CARGO_PKG_VERSION")
         )
         .map_err(output_failure),
-        Command::Import(args) => run_import(&cli.global, args, stdout, stderr),
-        Command::Status => run_status(&cli.global, stdout),
-        Command::Usage => run_usage(&cli.global, stdout),
-        Command::Export(args) => run_export(&cli.global, args, stdout),
+        Command::Setup => run_setup(&cli.global, context, stdout),
+        Command::Config(args) => run_config(&cli.global, args, context, stdout),
+        Command::Data(args) => run_data(&cli.global, args, context, stdin, stdout),
+        Command::Import(args) => run_import(&cli.global, args, context, stdout, stderr),
+        Command::Status => run_status(&cli.global, context, stdout),
+        Command::Usage => run_usage(&cli.global, context, stdout),
+        Command::Export(args) => run_export(&cli.global, args, context, stdout),
         _ => Err(CliFailure::new(
             EXIT_INVALID_INPUT,
             "not_implemented",
@@ -285,9 +400,10 @@ fn run_with_io(cli: Cli, stdout: &mut dyn Write, stderr: &mut dyn Write) -> Exit
 fn run_export(
     global: &GlobalOptions,
     args: &ExportArgs,
+    context: &RuntimeContext,
     stdout: &mut dyn Write,
 ) -> Result<(), CliFailure> {
-    let storage = open_database(global, "export")?;
+    let storage = open_database(global, context)?;
     let records = storage
         .query_usage(&UsageQuery::default())
         .map_err(storage_failure)?;
@@ -324,6 +440,144 @@ fn run_export(
         }
     } else {
         stdout.write_all(&bytes).map_err(output_failure)
+    }
+}
+
+fn run_setup(
+    global: &GlobalOptions,
+    context: &RuntimeContext,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    let outcome = write_initial_config(&context.paths).map_err(configuration_failure)?;
+    let summary = SetupSummary {
+        config_path: context.paths.config_file().display().to_string(),
+        data_directory: context.paths.data_dir().display().to_string(),
+        database_path: context.paths.database_file().display().to_string(),
+        config_created: outcome == SetupOutcome::Created,
+    };
+
+    if global.json {
+        render_json_success("setup", summary, Vec::new(), stdout)
+    } else if global.quiet {
+        Ok(())
+    } else {
+        let action = match outcome {
+            SetupOutcome::Created => "Created",
+            SetupOutcome::AlreadyPresent => "Kept existing",
+        };
+        writeln!(stdout, "{action} configuration: {}", summary.config_path)
+            .and_then(|()| writeln!(stdout, "Data directory: {}", summary.data_directory))
+            .and_then(|()| writeln!(stdout, "Database: {}", summary.database_path))
+            .map_err(output_failure)
+    }
+}
+
+fn run_config(
+    global: &GlobalOptions,
+    args: &ConfigArgs,
+    context: &RuntimeContext,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    let resolved = resolve(global, context)?;
+    match args.command {
+        ConfigCommand::Path => {
+            let summary = ConfigPathSummary {
+                path: resolved.config_path.display().to_string(),
+                source: resolved.config_source,
+                exists: resolved.config_exists,
+            };
+            if global.json {
+                render_json_success("config", summary, Vec::new(), stdout)
+            } else {
+                writeln!(stdout, "{}", summary.path).map_err(output_failure)
+            }
+        }
+        ConfigCommand::Show => {
+            let summary = config_show_summary(&resolved);
+            if global.json {
+                render_json_success("config", summary, Vec::new(), stdout)
+            } else {
+                writeln!(
+                    stdout,
+                    "Configuration: {} (source: {}, exists: {})",
+                    summary.config.path,
+                    source_name(summary.config.source),
+                    summary.config.exists
+                )
+                .and_then(|()| {
+                    writeln!(
+                        stdout,
+                        "Database: {} (source: {})",
+                        summary.database_path,
+                        source_name(summary.database_source)
+                    )
+                })
+                .map_err(output_failure)
+            }
+        }
+        ConfigCommand::Validate => {
+            if global.json {
+                render_json_success("config", config_show_summary(&resolved), Vec::new(), stdout)
+            } else if global.quiet {
+                Ok(())
+            } else {
+                writeln!(
+                    stdout,
+                    "Configuration is valid: {}",
+                    resolved.config_path.display()
+                )
+                .map_err(output_failure)
+            }
+        }
+    }
+}
+
+fn run_data(
+    global: &GlobalOptions,
+    args: &DataArgs,
+    context: &RuntimeContext,
+    _stdin: &mut dyn BufRead,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    match &args.command {
+        DataCommand::Path => {
+            let resolved = resolve(global, context)?;
+            let summary = DataPathSummary {
+                path: resolved.database_path.display().to_string(),
+                source: resolved.database_source,
+            };
+            if global.json {
+                render_json_success("data", summary, Vec::new(), stdout)
+            } else {
+                writeln!(stdout, "{}", summary.path).map_err(output_failure)
+            }
+        }
+        DataCommand::Backup { .. } | DataCommand::Delete { .. } => Err(CliFailure::new(
+            EXIT_INVALID_INPUT,
+            "not_implemented",
+            "this data operation is not implemented yet",
+        )),
+    }
+}
+
+fn config_show_summary(resolved: &ResolvedConfig) -> ConfigShowSummary {
+    ConfigShowSummary {
+        config: ConfigPathSummary {
+            path: resolved.config_path.display().to_string(),
+            source: resolved.config_source,
+            exists: resolved.config_exists,
+        },
+        database_path: resolved.database_path.display().to_string(),
+        database_source: resolved.database_source,
+    }
+}
+
+fn source_name(source: ConfigSource) -> &'static str {
+    match source {
+        ConfigSource::CommandLine => "command line",
+        ConfigSource::Environment => "environment",
+        ConfigSource::Configuration => "configuration",
+        ConfigSource::Default => "default",
     }
 }
 
@@ -469,8 +723,12 @@ fn serialization_failure(error: impl std::fmt::Display) -> CliFailure {
     )
 }
 
-fn run_status(global: &GlobalOptions, stdout: &mut dyn Write) -> Result<(), CliFailure> {
-    let storage = open_database(global, "status")?;
+fn run_status(
+    global: &GlobalOptions,
+    context: &RuntimeContext,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    let storage = open_database(global, context)?;
     let aggregate = storage
         .aggregate_usage(&UsageQuery::default())
         .map_err(storage_failure)?;
@@ -511,8 +769,12 @@ fn run_status(global: &GlobalOptions, stdout: &mut dyn Write) -> Result<(), CliF
     }
 }
 
-fn run_usage(global: &GlobalOptions, stdout: &mut dyn Write) -> Result<(), CliFailure> {
-    let storage = open_database(global, "usage")?;
+fn run_usage(
+    global: &GlobalOptions,
+    context: &RuntimeContext,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    let storage = open_database(global, context)?;
     let records = storage
         .query_usage(&UsageQuery::default())
         .map_err(storage_failure)?;
@@ -554,16 +816,42 @@ fn run_usage(global: &GlobalOptions, stdout: &mut dyn Write) -> Result<(), CliFa
 
 fn open_database(
     global: &GlobalOptions,
-    command: &'static str,
+    context: &RuntimeContext,
 ) -> Result<SqliteStorage, CliFailure> {
-    let database = global.database.as_ref().ok_or_else(|| {
+    let resolved = resolve(global, context)?;
+    ensure_database_directory(&resolved.database_path)?;
+    SqliteStorage::open(&resolved.database_path).map_err(storage_failure)
+}
+
+fn resolve(global: &GlobalOptions, context: &RuntimeContext) -> Result<ResolvedConfig, CliFailure> {
+    resolve_config(
+        &ResolveOptions {
+            config_path: global.config.clone(),
+            database_path: global.database.clone(),
+        },
+        &context.environment,
+        &context.paths,
+    )
+    .map_err(configuration_failure)
+}
+
+fn ensure_database_directory(path: &std::path::Path) -> Result<(), CliFailure> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(parent).map_err(|error| {
         CliFailure::new(
-            EXIT_INVALID_INPUT,
-            "database_required",
-            format!("--database <PATH> is required for the {command} command"),
+            EXIT_FILE_IO,
+            "database_path_io",
+            format!(
+                "could not create database directory {}: {error}",
+                parent.display()
+            ),
         )
-    })?;
-    SqliteStorage::open(database).map_err(storage_failure)
+    })
 }
 
 fn status_summary(aggregate: UsageAggregate) -> StatusSummary {
@@ -634,6 +922,7 @@ fn usage_kind_name(kind: UsageKind) -> &'static str {
 fn run_import(
     global: &GlobalOptions,
     args: &ImportArgs,
+    context: &RuntimeContext,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> Result<(), CliFailure> {
@@ -672,14 +961,7 @@ fn run_import(
         return Ok(());
     }
 
-    let database = global.database.as_ref().ok_or_else(|| {
-        CliFailure::new(
-            EXIT_INVALID_INPUT,
-            "database_required",
-            "--database <PATH> is required unless import is run with --dry-run",
-        )
-    })?;
-    let mut storage = SqliteStorage::open(database).map_err(storage_failure)?;
+    let mut storage = open_database(global, context)?;
     let inserted = storage
         .insert_usage_records(&exchange.records)
         .map_err(storage_failure)?;
@@ -719,6 +1001,21 @@ fn exchange_failure(error: ExchangeError) -> CliFailure {
 
 fn storage_failure(error: nummetria_storage::StorageError) -> CliFailure {
     CliFailure::new(EXIT_STORAGE, "storage_failure", error.to_string())
+}
+
+fn configuration_failure(error: ConfigError) -> CliFailure {
+    let (exit_code, code) = match error {
+        ConfigError::Read { .. }
+        | ConfigError::CreateDirectory { .. }
+        | ConfigError::Write { .. }
+        | ConfigError::Serialize(_)
+        | ConfigError::Paths(_) => (EXIT_FILE_IO, "configuration_io"),
+        ConfigError::EmptyEnvironment { .. }
+        | ConfigError::ExplicitConfigMissing(_)
+        | ConfigError::Parse { .. }
+        | ConfigError::UnsupportedVersion { .. } => (EXIT_INVALID_INPUT, "invalid_configuration"),
+    };
+    CliFailure::new(exit_code, code, error.to_string())
 }
 
 fn output_failure(error: io::Error) -> CliFailure {
@@ -786,8 +1083,8 @@ fn command_name(command: &Command) -> &'static str {
         Command::Budget => "budget",
         Command::Import(_) => "import",
         Command::Export(_) => "export",
-        Command::Config => "config",
-        Command::Data => "data",
+        Command::Config(_) => "config",
+        Command::Data(_) => "data",
         Command::Doctor => "doctor",
         Command::Completion => "completion",
         Command::Version => "version",
@@ -806,10 +1103,24 @@ mod tests {
     use super::*;
 
     fn run(args: &[&str]) -> (bool, String, String) {
+        run_in_context(
+            args,
+            PlatformPaths::from_directories("unused-config", "unused-data"),
+            EnvironmentOverrides::default(),
+        )
+    }
+
+    fn run_in_context(
+        args: &[&str],
+        paths: PlatformPaths,
+        environment: EnvironmentOverrides,
+    ) -> (bool, String, String) {
         let cli = Cli::try_parse_from(args).unwrap();
+        let context = RuntimeContext { paths, environment };
+        let mut stdin = io::Cursor::new(Vec::<u8>::new());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let exit = run_with_io(cli, &mut stdout, &mut stderr);
+        let exit = run_with_io(cli, &context, &mut stdin, &mut stdout, &mut stderr);
         (
             exit == ExitCode::SUCCESS,
             String::from_utf8(stdout).unwrap(),
@@ -833,8 +1144,8 @@ mod tests {
             &["nummetria", "budget"],
             &["nummetria", "import", "usage.json"],
             &["nummetria", "export", "--format", "json"],
-            &["nummetria", "config"],
-            &["nummetria", "data"],
+            &["nummetria", "config", "show"],
+            &["nummetria", "data", "path"],
             &["nummetria", "doctor"],
             &["nummetria", "completion"],
             &["nummetria", "version"],
@@ -855,6 +1166,137 @@ mod tests {
 
         assert!(before.global.json);
         assert!(after.global.json);
+    }
+
+    #[test]
+    fn setup_is_create_once_and_reports_standard_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = PlatformPaths::from_directories(
+            directory.path().join("config"),
+            directory.path().join("data"),
+        );
+
+        let (first_success, first, first_error) = run_in_context(
+            &["nummetria", "setup"],
+            paths.clone(),
+            EnvironmentOverrides::default(),
+        );
+        assert!(first_success, "{first_error}");
+        assert!(first.contains("Created configuration"));
+        assert!(paths.config_file().exists());
+        assert!(!paths.database_file().exists());
+
+        let (second_success, second, second_error) = run_in_context(
+            &["nummetria", "setup"],
+            paths,
+            EnvironmentOverrides::default(),
+        );
+        assert!(second_success, "{second_error}");
+        assert!(second.contains("Kept existing configuration"));
+    }
+
+    #[test]
+    fn config_and_data_commands_explain_resolved_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = PlatformPaths::from_directories(
+            directory.path().join("config"),
+            directory.path().join("data"),
+        );
+        std::fs::create_dir_all(paths.config_dir()).unwrap();
+        std::fs::write(
+            paths.config_file(),
+            "config_version = 1\ndatabase_path = 'from-config.db'\n",
+        )
+        .unwrap();
+
+        let (success, output, error) = run_in_context(
+            &["nummetria", "--json", "config", "show"],
+            paths.clone(),
+            EnvironmentOverrides::default(),
+        );
+        assert!(success, "{error}");
+        let output: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(output["data"]["database_source"], "configuration");
+        assert_eq!(
+            output["data"]["database_path"],
+            paths
+                .config_dir()
+                .join("from-config.db")
+                .display()
+                .to_string()
+        );
+
+        let environment_database = directory.path().join("from-environment.db");
+        let (success, output, error) = run_in_context(
+            &["nummetria", "--json", "data", "path"],
+            paths,
+            EnvironmentOverrides {
+                config_path: None,
+                database_path: Some(environment_database.clone()),
+            },
+        );
+        assert!(success, "{error}");
+        let output: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(output["data"]["source"], "environment");
+        assert_eq!(
+            output["data"]["path"],
+            environment_database.display().to_string()
+        );
+    }
+
+    #[test]
+    fn data_commands_use_the_default_database_without_an_explicit_option() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = PlatformPaths::from_directories(
+            directory.path().join("config"),
+            directory.path().join("data"),
+        );
+
+        let (success, output, error) = run_in_context(
+            &[
+                "nummetria",
+                "import",
+                "../../fixtures/exchange/valid-v1.json",
+            ],
+            paths.clone(),
+            EnvironmentOverrides::default(),
+        );
+        assert!(success, "{error}");
+        assert!(output.contains("1 inserted"));
+        assert!(paths.database_file().exists());
+
+        let (success, output, error) = run_in_context(
+            &["nummetria", "--json", "status"],
+            paths,
+            EnvironmentOverrides::default(),
+        );
+        assert!(success, "{error}");
+        let output: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(output["data"]["record_count"], 1);
+    }
+
+    #[test]
+    fn dry_run_does_not_read_an_invalid_configuration() {
+        let directory = tempfile::tempdir().unwrap();
+        let invalid_config = directory.path().join("invalid.toml");
+        std::fs::write(&invalid_config, "this is not toml = [").unwrap();
+        let (success, output, error) = run_in_context(
+            &[
+                "nummetria",
+                "--config",
+                invalid_config.to_str().unwrap(),
+                "import",
+                "../../fixtures/exchange/valid-v1.json",
+                "--dry-run",
+            ],
+            PlatformPaths::from_directories(
+                directory.path().join("config"),
+                directory.path().join("data"),
+            ),
+            EnvironmentOverrides::default(),
+        );
+        assert!(success, "{error}");
+        assert!(output.contains("Validated 1 record(s)"));
     }
 
     #[test]

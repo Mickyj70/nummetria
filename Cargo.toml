@@ -19,6 +19,7 @@ rust-version = "1.85"
 chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
 clap = { version = "4.5.47", features = ["derive"] }
 csv = "1"
+directories = "6"
 nummetria-core = { path = "crates/core" }
 nummetria-platform = { path = "crates/platform" }
 nummetria-providers = { path = "crates/providers" }

@@ -65,3 +65,7 @@ The v0.1 JSON exchange, atomic import behavior, initial `status` and `usage`
 read-back, export formats, output envelopes, and exit codes are defined in
 [Import and export](import-export.md). These behaviors are compatibility
 contracts from the first implementation onward.
+
+Configuration precedence, operating-system paths, native credential handling,
+setup, configuration inspection, backup, and deliberate data deletion are
+defined in [Configuration, paths, and credentials](configuration.md).

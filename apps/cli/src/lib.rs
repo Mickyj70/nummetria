@@ -1966,6 +1966,13 @@ mod tests {
                 .cursor,
             "2026-08-03"
         );
+        drop(storage);
+        let database_bytes = std::fs::read(paths.database_file()).unwrap();
+        assert!(
+            !database_bytes
+                .windows(b"admin-test-key".len())
+                .any(|window| window == b"admin-test-key")
+        );
     }
 
     #[test]

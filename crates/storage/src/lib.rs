@@ -158,6 +158,45 @@ impl SqliteStorage {
         Ok(summary)
     }
 
+    /// Atomically inserts provider observations and advances collection checkpoints.
+    pub fn insert_usage_records_with_checkpoints(
+        &mut self,
+        records: &[UsageRecord],
+        checkpoints: &[CollectionCheckpoint],
+    ) -> Result<InsertSummary, StorageError> {
+        if checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.stream.trim().is_empty())
+        {
+            return Err(StorageError::EmptyCheckpointStream);
+        }
+
+        let transaction = self.connection.transaction()?;
+        let mut summary = InsertSummary::default();
+        for record in records {
+            match insert_record(&transaction, record)? {
+                InsertOutcome::Inserted => summary.inserted += 1,
+                InsertOutcome::AlreadyPresent => summary.already_present += 1,
+            }
+        }
+        for checkpoint in checkpoints {
+            transaction.execute(
+                "INSERT INTO collection_checkpoints (provider, stream, cursor, updated_at)\n\
+                 VALUES (?1, ?2, ?3, ?4)\n\
+                 ON CONFLICT(provider, stream) DO UPDATE SET\n\
+                     cursor = excluded.cursor, updated_at = excluded.updated_at",
+                params![
+                    checkpoint.provider.as_str(),
+                    checkpoint.stream,
+                    checkpoint.cursor,
+                    timestamp(checkpoint.updated_at),
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(summary)
+    }
+
     pub fn get_usage_record(&self, id: &RecordId) -> Result<Option<UsageRecord>, StorageError> {
         let payload = self
             .connection
@@ -697,6 +736,49 @@ mod tests {
             storage
                 .get_checkpoint(&provider, "organization-usage")
                 .unwrap(),
+            Some(checkpoint)
+        );
+    }
+
+    #[test]
+    fn provider_records_and_checkpoints_commit_atomically() {
+        let mut storage = SqliteStorage::open_in_memory().unwrap();
+        let provider = ProviderId::new("openai").unwrap();
+        let checkpoint = CollectionCheckpoint {
+            provider: provider.clone(),
+            stream: "completions".into(),
+            cursor: "2026-08-19".into(),
+            updated_at: instant(19, 1),
+        };
+        let original = record("same-id", "openai", 17, reported("0.03"));
+        storage.insert_usage_record(&original).unwrap();
+
+        let new = record("new-id", "openai", 18, Cost::Unknown);
+        let conflict = record("same-id", "openai", 17, reported("0.04"));
+        assert!(
+            storage
+                .insert_usage_records_with_checkpoints(
+                    &[new.clone(), conflict],
+                    std::slice::from_ref(&checkpoint),
+                )
+                .is_err()
+        );
+        assert_eq!(storage.get_usage_record(&new.id).unwrap(), None);
+        assert_eq!(
+            storage.get_checkpoint(&provider, "completions").unwrap(),
+            None
+        );
+
+        let summary = storage
+            .insert_usage_records_with_checkpoints(
+                std::slice::from_ref(&new),
+                std::slice::from_ref(&checkpoint),
+            )
+            .unwrap();
+        assert_eq!(summary.inserted, 1);
+        assert_eq!(storage.get_usage_record(&new.id).unwrap(), Some(new));
+        assert_eq!(
+            storage.get_checkpoint(&provider, "completions").unwrap(),
             Some(checkpoint)
         );
     }

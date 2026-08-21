@@ -78,3 +78,6 @@ defined in [Configuration, paths, and credentials](configuration.md).
 
 The OpenAI credential, collection, normalization, pagination, retry, and
 checkpoint contract is defined in [OpenAI provider](providers/openai.md).
+
+The matching organization-level contract for Anthropic usage and costs is
+defined in [Anthropic provider](providers/anthropic.md).

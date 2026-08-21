@@ -23,6 +23,11 @@ audit how a number was produced.
 - A calculated or estimated cost records the pricing reference used.
 - Provider payloads are not stored as an escape hatch for missing modeling.
 - Exchange formats carry a schema version.
+- A record has at least one usage quantity or a cost with known evidence.
+
+Provider cost APIs may emit a cost observation with no usage quantities when
+the provider cannot attribute reported spend to the same grouping as usage.
+Keeping that observation separate avoids inventing model-level allocations.
 
 The first public exchange shape is
 [`usage-record-v1.schema.json`](../schemas/usage-record-v1.schema.json). Decimal
@@ -31,8 +36,9 @@ binary floating-point conversion. A sanitized valid example lives under
 `fixtures/usage/` and is parsed by the core test suite.
 
 Rust constructors and deserialization enforce the same invariants. Invalid
-identifiers, reversed time ranges, negative quantities, empty quantity lists,
-and unsupported schema versions cannot become `UsageRecord` values.
+identifiers, reversed time ranges, negative quantities, observations with
+neither quantities nor known cost, and unsupported schema versions cannot
+become `UsageRecord` values.
 
 ## SQLite representation
 

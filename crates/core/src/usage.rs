@@ -14,8 +14,8 @@ pub enum DomainError {
     InvalidTimeRange,
     #[error("usage quantity cannot be negative")]
     NegativeQuantity,
-    #[error("a usage record must contain at least one quantity")]
-    MissingQuantities,
+    #[error("an observation must contain at least one usage quantity or a known cost")]
+    MissingObservation,
     #[error("unsupported usage record schema version {version}")]
     UnsupportedSchemaVersion { version: u16 },
 }
@@ -274,8 +274,8 @@ impl UsageRecord {
         source: CollectionSource,
         collected_at: DateTime<Utc>,
     ) -> Result<Self, DomainError> {
-        if quantities.is_empty() {
-            return Err(DomainError::MissingQuantities);
+        if quantities.is_empty() && matches!(cost, Cost::Unknown) {
+            return Err(DomainError::MissingObservation);
         }
 
         Ok(Self {
@@ -408,7 +408,12 @@ mod tests {
 
         let mut json = serde_json::to_value(example_record()).unwrap();
         json["quantities"] = serde_json::json!([]);
+        json["cost"] = serde_json::json!({ "evidence": "unknown" });
         assert!(serde_json::from_value::<UsageRecord>(json).is_err());
+
+        let mut json = serde_json::to_value(example_record()).unwrap();
+        json["quantities"] = serde_json::json!([]);
+        assert!(serde_json::from_value::<UsageRecord>(json).is_ok());
 
         let mut json = serde_json::to_value(example_record()).unwrap();
         json["quantities"][0]["amount"] = "-1".into();

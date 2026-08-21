@@ -1,0 +1,20 @@
+{
+  "object": "page",
+  "data": [{
+    "object": "bucket",
+    "start_time": 1785542400,
+    "end_time": 1785628800,
+    "results": [{
+      "object": "organization.usage.completions.result",
+      "input_tokens": 1000,
+      "output_tokens": 250,
+      "input_cached_tokens": 400,
+      "input_cache_write_tokens": 20,
+      "num_model_requests": 4,
+      "project_id": "proj_alpha",
+      "model": "gpt-5"
+    }]
+  }],
+  "has_more": true,
+  "next_page": "usage-page-2"
+}

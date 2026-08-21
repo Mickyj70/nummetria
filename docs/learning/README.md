@@ -23,3 +23,4 @@ concept. Small changes can teach directly through the PR description instead.
 3. [Safe SQLite persistence](003-sqlite-storage.md)
 4. [A trustworthy import pipeline](004-import-pipeline.md)
 5. [Cross-platform configuration without leaking secrets](005-platform-configuration.md)
+6. [Normalize a provider API without inventing data](006-openai-provider.md)

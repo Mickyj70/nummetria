@@ -32,3 +32,8 @@ releases begin.
 - Create-once setup, configuration inspection, automatic database discovery,
   consistent backup, and deliberately confirmed data deletion commands.
 - Secret-safe configuration errors that never echo malformed file contents.
+- OpenAI admin credentials stored through native credential stores, with
+  profile status and deliberate deletion commands.
+- Paginated OpenAI completions usage and organization cost collection with
+  bounded retries, deterministic records, reported cost evidence, and atomic
+  checkpoints.

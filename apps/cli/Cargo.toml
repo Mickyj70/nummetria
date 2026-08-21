@@ -13,10 +13,13 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+chrono.workspace = true
 csv.workspace = true
 nummetria-core.workspace = true
 nummetria-platform.workspace = true
+nummetria-providers.workspace = true
 nummetria-storage.workspace = true
+rpassword.workspace = true
 rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -2,16 +2,21 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use nummetria_core::{
     CollectionSource, Cost, CostEvidence, ExchangeError, RecordValidationError, UsageExchange,
     UsageKind, UsageRecord,
 };
 use nummetria_platform::{
-    ConfigError, ConfigSource, EnvironmentOverrides, PlatformPaths, ResolveOptions, ResolvedConfig,
+    ConfigError, ConfigSource, CredentialId, EnvironmentOverrides, KeyringSecretStore,
+    PlatformPaths, ResolveOptions, ResolvedConfig, SecretError, SecretStore, SecretValue,
     SetupOutcome, resolve_config, write_initial_config,
 };
-use nummetria_storage::{SqliteStorage, StorageError, UsageAggregate, UsageQuery};
+use nummetria_providers::{CollectionRange, OpenAiClient, OpenAiError, ProviderBatch};
+use nummetria_storage::{
+    CollectionCheckpoint, SqliteStorage, StorageError, UsageAggregate, UsageQuery,
+};
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -19,6 +24,7 @@ const OUTPUT_VERSION: u16 = 1;
 const EXIT_INVALID_INPUT: u8 = 2;
 const EXIT_FILE_IO: u8 = 3;
 const EXIT_STORAGE: u8 = 4;
+const EXIT_PROVIDER: u8 = 5;
 
 /// Nummetria's command-line interface.
 #[derive(Debug, Parser)]
@@ -124,6 +130,75 @@ pub struct DataArgs {
     pub command: DataCommand,
 }
 
+#[derive(Debug, clap::Args)]
+pub struct ProvidersArgs {
+    #[command(subcommand)]
+    pub command: ProvidersCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProvidersCommand {
+    #[command(name = "openai")]
+    /// Manage the OpenAI admin credential.
+    OpenAi(OpenAiProviderArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct OpenAiProviderArgs {
+    #[command(subcommand)]
+    pub command: OpenAiProviderCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OpenAiProviderCommand {
+    /// Store an OpenAI admin key in the native credential store.
+    SetKey {
+        #[arg(long, default_value = "default")]
+        profile: String,
+        /// Read the key from standard input instead of a hidden terminal prompt.
+        #[arg(long)]
+        from_stdin: bool,
+    },
+    /// Report whether a credential exists without revealing it.
+    Status {
+        #[arg(long, default_value = "default")]
+        profile: String,
+    },
+    /// Remove an OpenAI credential from the native store.
+    DeleteKey {
+        #[arg(long, default_value = "default")]
+        profile: String,
+        /// Skip the interactive confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, clap::Args)]
+pub struct CollectArgs {
+    #[command(subcommand)]
+    pub command: CollectCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CollectCommand {
+    #[command(name = "openai")]
+    /// Collect OpenAI organization usage and costs.
+    OpenAi(OpenAiCollectArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct OpenAiCollectArgs {
+    #[arg(long, default_value = "default")]
+    pub profile: String,
+    /// Inclusive UTC start date.
+    #[arg(long, value_name = "YYYY-MM-DD")]
+    pub start: Option<String>,
+    /// Exclusive UTC end date.
+    #[arg(long, value_name = "YYYY-MM-DD")]
+    pub end: Option<String>,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum DataCommand {
     /// Print the resolved SQLite database path.
@@ -153,11 +228,11 @@ pub enum Command {
     /// Show a concise usage and cost summary.
     Status,
     /// Collect new usage from configured providers.
-    Collect,
+    Collect(CollectArgs),
     /// Query and group stored usage.
     Usage,
     /// Manage and test provider connections.
-    Providers,
+    Providers(ProvidersArgs),
     /// Create and check local budgets.
     Budget,
     /// Validate and store an exchange file.
@@ -281,9 +356,49 @@ struct DeleteSummary {
     records_deleted: usize,
 }
 
+#[derive(Debug, Serialize)]
+struct CredentialSummary {
+    provider: &'static str,
+    profile: String,
+    configured: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct CollectSummary {
+    provider: &'static str,
+    profile: String,
+    start: String,
+    end: String,
+    usage_pages: usize,
+    cost_pages: usize,
+    observations_read: usize,
+    records_inserted: usize,
+    records_already_present: usize,
+}
+
 struct RuntimeContext {
     paths: PlatformPaths,
     environment: EnvironmentOverrides,
+}
+
+trait OpenAiCollect: Send + Sync {
+    fn collect(
+        &self,
+        admin_key: &str,
+        range: &CollectionRange,
+        collected_at: DateTime<Utc>,
+    ) -> Result<ProviderBatch, OpenAiError>;
+}
+
+impl OpenAiCollect for OpenAiClient {
+    fn collect(
+        &self,
+        admin_key: &str,
+        range: &CollectionRange,
+        collected_at: DateTime<Utc>,
+    ) -> Result<ProviderBatch, OpenAiError> {
+        OpenAiClient::collect(self, admin_key, range, collected_at)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -365,9 +480,20 @@ pub fn run() -> ExitCode {
         EnvironmentOverrides::default()
     };
     let context = RuntimeContext { paths, environment };
+    let secrets = KeyringSecretStore;
+    let openai = match OpenAiClient::new() {
+        Ok(client) => client,
+        Err(error) => {
+            let failure = provider_failure(error);
+            render_failure(&cli.global, command, &failure, &mut stderr);
+            return ExitCode::from(failure.exit_code);
+        }
+    };
     run_with_io(
         cli,
         &context,
+        &secrets,
+        &openai,
         &mut io::stdin().lock(),
         &mut stdout,
         &mut stderr,
@@ -377,6 +503,8 @@ pub fn run() -> ExitCode {
 fn run_with_io(
     cli: Cli,
     context: &RuntimeContext,
+    secrets: &dyn SecretStore,
+    openai: &dyn OpenAiCollect,
     stdin: &mut dyn BufRead,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
@@ -393,6 +521,8 @@ fn run_with_io(
         Command::Setup => run_setup(&cli.global, context, stdout),
         Command::Config(args) => run_config(&cli.global, args, context, stdout),
         Command::Data(args) => run_data(&cli.global, args, context, stdin, stdout),
+        Command::Providers(args) => run_providers(&cli.global, args, secrets, stdin, stdout),
+        Command::Collect(args) => run_collect(&cli.global, args, context, secrets, openai, stdout),
         Command::Import(args) => run_import(&cli.global, args, context, stdout, stderr),
         Command::Status => run_status(&cli.global, context, stdout),
         Command::Usage => run_usage(&cli.global, context, stdout),
@@ -570,6 +700,289 @@ fn run_data(
         }
         DataCommand::Backup { output } => run_backup(global, context, output, stdout),
         DataCommand::Delete { all, yes } => run_delete(global, context, *all, *yes, stdin, stdout),
+    }
+}
+
+fn run_providers(
+    global: &GlobalOptions,
+    args: &ProvidersArgs,
+    secrets: &dyn SecretStore,
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    match &args.command {
+        ProvidersCommand::OpenAi(args) => match &args.command {
+            OpenAiProviderCommand::SetKey {
+                profile,
+                from_stdin,
+            } => {
+                let id = openai_credential_id(profile)?;
+                let value = if *from_stdin {
+                    let mut value = String::new();
+                    stdin.read_line(&mut value).map_err(|error| {
+                        CliFailure::new(
+                            EXIT_FILE_IO,
+                            "input_io",
+                            format!("could not read credential: {error}"),
+                        )
+                    })?;
+                    value.trim_end_matches(['\r', '\n']).to_owned()
+                } else {
+                    rpassword::prompt_password("OpenAI admin key: ").map_err(|error| {
+                        CliFailure::new(
+                            EXIT_FILE_IO,
+                            "input_io",
+                            format!("could not read hidden credential: {error}"),
+                        )
+                    })?
+                };
+                let value = SecretValue::new(value).map_err(secret_failure)?;
+                secrets.set(&id, &value).map_err(secret_failure)?;
+                render_credential_summary(global, profile, true, "stored", stdout)
+            }
+            OpenAiProviderCommand::Status { profile } => {
+                let id = openai_credential_id(profile)?;
+                let configured = secrets.get(&id).map_err(secret_failure)?.is_some();
+                render_credential_summary(global, profile, configured, "checked", stdout)
+            }
+            OpenAiProviderCommand::DeleteKey { profile, yes } => {
+                if global.json && !yes {
+                    return Err(CliFailure::new(
+                        EXIT_INVALID_INPUT,
+                        "confirmation_required",
+                        "providers openai delete-key with --json requires --yes",
+                    ));
+                }
+                if !yes {
+                    write!(
+                        stdout,
+                        "Delete the OpenAI credential for profile '{profile}'? Type 'delete' to continue: "
+                    )
+                    .and_then(|()| stdout.flush())
+                    .map_err(output_failure)?;
+                    let mut confirmation = String::new();
+                    stdin.read_line(&mut confirmation).map_err(|error| {
+                        CliFailure::new(
+                            EXIT_FILE_IO,
+                            "input_io",
+                            format!("could not read confirmation: {error}"),
+                        )
+                    })?;
+                    if confirmation.trim() != "delete" {
+                        return Err(CliFailure::new(
+                            EXIT_INVALID_INPUT,
+                            "confirmation_required",
+                            "credential deletion cancelled",
+                        ));
+                    }
+                }
+                let id = openai_credential_id(profile)?;
+                secrets.delete(&id).map_err(secret_failure)?;
+                render_credential_summary(global, profile, false, "deleted", stdout)
+            }
+        },
+    }
+}
+
+fn render_credential_summary(
+    global: &GlobalOptions,
+    profile: &str,
+    configured: bool,
+    action: &str,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    let summary = CredentialSummary {
+        provider: "openai",
+        profile: profile.to_owned(),
+        configured,
+    };
+    if global.json {
+        render_json_success("providers", summary, Vec::new(), stdout)
+    } else if global.quiet {
+        Ok(())
+    } else {
+        writeln!(
+            stdout,
+            "OpenAI profile '{profile}' {action}; credential configured: {configured}."
+        )
+        .map_err(output_failure)
+    }
+}
+
+fn run_collect(
+    global: &GlobalOptions,
+    args: &CollectArgs,
+    context: &RuntimeContext,
+    secrets: &dyn SecretStore,
+    openai: &dyn OpenAiCollect,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    match &args.command {
+        CollectCommand::OpenAi(args) => {
+            run_collect_openai(global, args, context, secrets, openai, stdout)
+        }
+    }
+}
+
+fn run_collect_openai(
+    global: &GlobalOptions,
+    args: &OpenAiCollectArgs,
+    context: &RuntimeContext,
+    secrets: &dyn SecretStore,
+    openai: &dyn OpenAiCollect,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    let credential_id = openai_credential_id(&args.profile)?;
+    let credential = secrets
+        .get(&credential_id)
+        .map_err(secret_failure)?
+        .ok_or_else(|| {
+            CliFailure::new(
+                EXIT_INVALID_INPUT,
+                "credential_missing",
+                format!(
+                    "OpenAI profile '{}' has no admin credential; run providers openai set-key",
+                    args.profile
+                ),
+            )
+        })?;
+    let collected_at = DateTime::<Utc>::from(std::time::SystemTime::now());
+    let default_end = collected_at.date_naive();
+    let end_date = parse_date_option(args.end.as_deref())?.unwrap_or(default_end);
+
+    let mut storage = open_database(global, context)?;
+    let provider = nummetria_core::ProviderId::new("openai")
+        .map_err(|error| CliFailure::new(EXIT_PROVIDER, "provider_failure", error.to_string()))?;
+    let usage_stream = format!("openai.completions:{}", args.profile);
+    let costs_stream = format!("openai.costs:{}", args.profile);
+    let usage_checkpoint = storage
+        .get_checkpoint(&provider, &usage_stream)
+        .map_err(storage_failure)?;
+    let costs_checkpoint = storage
+        .get_checkpoint(&provider, &costs_stream)
+        .map_err(storage_failure)?;
+    let default_start = checkpoint_start(&usage_checkpoint, &costs_checkpoint)
+        .unwrap_or(end_date - Duration::days(30));
+    let start_date = parse_date_option(args.start.as_deref())?.unwrap_or(default_start);
+    let start = utc_midnight(start_date)?;
+    let end = utc_midnight(end_date)?;
+    let range = CollectionRange::new(start, end).map_err(provider_failure)?;
+
+    let batch = openai
+        .collect(credential.expose_secret(), &range, collected_at)
+        .map_err(provider_failure)?;
+    let end_cursor = end_date.format("%Y-%m-%d").to_string();
+    let checkpoints = vec![
+        advanced_checkpoint(
+            &provider,
+            usage_stream,
+            usage_checkpoint,
+            &end_cursor,
+            collected_at,
+        ),
+        advanced_checkpoint(
+            &provider,
+            costs_stream,
+            costs_checkpoint,
+            &end_cursor,
+            collected_at,
+        ),
+    ];
+    let observations_read = batch.records.len();
+    let inserted = storage
+        .insert_usage_records_with_checkpoints(&batch.records, &checkpoints)
+        .map_err(storage_failure)?;
+    let summary = CollectSummary {
+        provider: "openai",
+        profile: args.profile.clone(),
+        start: start_date.format("%Y-%m-%d").to_string(),
+        end: end_cursor,
+        usage_pages: batch.usage_pages,
+        cost_pages: batch.cost_pages,
+        observations_read,
+        records_inserted: inserted.inserted,
+        records_already_present: inserted.already_present,
+    };
+    if global.json {
+        render_json_success("collect", summary, Vec::new(), stdout)
+    } else if global.quiet {
+        Ok(())
+    } else {
+        writeln!(
+            stdout,
+            "Collected OpenAI {}..{}: {} observation(s), {} inserted, {} already present ({} usage page(s), {} cost page(s)).",
+            summary.start,
+            summary.end,
+            summary.observations_read,
+            summary.records_inserted,
+            summary.records_already_present,
+            summary.usage_pages,
+            summary.cost_pages,
+        )
+        .map_err(output_failure)
+    }
+}
+
+fn openai_credential_id(profile: &str) -> Result<CredentialId, CliFailure> {
+    CredentialId::new("openai", profile)
+        .map_err(|error| CliFailure::new(EXIT_INVALID_INPUT, "invalid_profile", error.to_string()))
+}
+
+fn parse_date_option(value: Option<&str>) -> Result<Option<NaiveDate>, CliFailure> {
+    value
+        .map(|value| {
+            NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| {
+                CliFailure::new(
+                    EXIT_INVALID_INPUT,
+                    "invalid_date",
+                    format!("invalid UTC date '{value}'; expected YYYY-MM-DD"),
+                )
+            })
+        })
+        .transpose()
+}
+
+fn utc_midnight(date: NaiveDate) -> Result<DateTime<Utc>, CliFailure> {
+    Utc.from_local_datetime(&date.and_hms_opt(0, 0, 0).expect("valid midnight"))
+        .single()
+        .ok_or_else(|| CliFailure::new(EXIT_INVALID_INPUT, "invalid_date", "invalid UTC date"))
+}
+
+fn checkpoint_start(
+    usage: &Option<CollectionCheckpoint>,
+    costs: &Option<CollectionCheckpoint>,
+) -> Option<NaiveDate> {
+    match (
+        usage
+            .as_ref()
+            .and_then(|value| NaiveDate::parse_from_str(&value.cursor, "%Y-%m-%d").ok()),
+        costs
+            .as_ref()
+            .and_then(|value| NaiveDate::parse_from_str(&value.cursor, "%Y-%m-%d").ok()),
+    ) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        _ => None,
+    }
+}
+
+fn advanced_checkpoint(
+    provider: &nummetria_core::ProviderId,
+    stream: String,
+    existing: Option<CollectionCheckpoint>,
+    candidate: &str,
+    updated_at: DateTime<Utc>,
+) -> CollectionCheckpoint {
+    let cursor = existing
+        .as_ref()
+        .map(|checkpoint| checkpoint.cursor.as_str())
+        .filter(|cursor| *cursor > candidate)
+        .unwrap_or(candidate)
+        .to_owned();
+    CollectionCheckpoint {
+        provider: provider.clone(),
+        stream,
+        cursor,
+        updated_at,
     }
 }
 
@@ -1154,6 +1567,18 @@ fn storage_failure(error: nummetria_storage::StorageError) -> CliFailure {
     CliFailure::new(EXIT_STORAGE, "storage_failure", error.to_string())
 }
 
+fn secret_failure(error: SecretError) -> CliFailure {
+    let exit_code = match error {
+        SecretError::InvalidCredentialId { .. } | SecretError::EmptySecret => EXIT_INVALID_INPUT,
+        SecretError::Backend(_) => EXIT_FILE_IO,
+    };
+    CliFailure::new(exit_code, "credential_store", error.to_string())
+}
+
+fn provider_failure(error: OpenAiError) -> CliFailure {
+    CliFailure::new(EXIT_PROVIDER, "provider_failure", error.to_string())
+}
+
 fn configuration_failure(error: ConfigError) -> CliFailure {
     let message = match &error {
         ConfigError::Parse { path, .. } => {
@@ -1234,9 +1659,9 @@ fn command_name(command: &Command) -> &'static str {
     match command {
         Command::Setup => "setup",
         Command::Status => "status",
-        Command::Collect => "collect",
+        Command::Collect(_) => "collect",
         Command::Usage => "usage",
-        Command::Providers => "providers",
+        Command::Providers(_) => "providers",
         Command::Budget => "budget",
         Command::Import(_) => "import",
         Command::Export(_) => "export",
@@ -1254,11 +1679,11 @@ fn command_uses_configuration(command: &Command) -> bool {
         | Command::Usage
         | Command::Export(_)
         | Command::Config(_)
-        | Command::Data(_) => true,
+        | Command::Data(_)
+        | Command::Collect(_) => true,
         Command::Import(args) => !args.dry_run,
         Command::Setup
-        | Command::Collect
-        | Command::Providers
+        | Command::Providers(_)
         | Command::Budget
         | Command::Doctor
         | Command::Completion
@@ -1273,9 +1698,50 @@ pub fn command() -> clap::Command {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use clap::Parser;
+    use nummetria_platform::InMemorySecretStore;
 
     use super::*;
+
+    struct UnavailableCollector;
+
+    impl OpenAiCollect for UnavailableCollector {
+        fn collect(
+            &self,
+            _admin_key: &str,
+            _range: &CollectionRange,
+            _collected_at: DateTime<Utc>,
+        ) -> Result<ProviderBatch, OpenAiError> {
+            Err(OpenAiError::Transport)
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingCollector {
+        keys: Mutex<Vec<String>>,
+    }
+
+    impl OpenAiCollect for RecordingCollector {
+        fn collect(
+            &self,
+            admin_key: &str,
+            _range: &CollectionRange,
+            _collected_at: DateTime<Utc>,
+        ) -> Result<ProviderBatch, OpenAiError> {
+            self.keys.lock().unwrap().push(admin_key.to_owned());
+            let exchange = UsageExchange::from_json_str(include_str!(
+                "../../../fixtures/exchange/valid-v1.json"
+            ))
+            .unwrap();
+            Ok(ProviderBatch {
+                records: exchange.records,
+                usage_pages: 2,
+                cost_pages: 1,
+            })
+        }
+    }
 
     fn run(args: &[&str]) -> (bool, String, String) {
         run_in_context(
@@ -1299,12 +1765,39 @@ mod tests {
         environment: EnvironmentOverrides,
         input: &[u8],
     ) -> (bool, String, String) {
+        let secrets = InMemorySecretStore::default();
+        run_with_services(
+            args,
+            paths,
+            environment,
+            input,
+            &secrets,
+            &UnavailableCollector,
+        )
+    }
+
+    fn run_with_services(
+        args: &[&str],
+        paths: PlatformPaths,
+        environment: EnvironmentOverrides,
+        input: &[u8],
+        secrets: &dyn SecretStore,
+        openai: &dyn OpenAiCollect,
+    ) -> (bool, String, String) {
         let cli = Cli::try_parse_from(args).unwrap();
         let context = RuntimeContext { paths, environment };
         let mut stdin = io::Cursor::new(input);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let exit = run_with_io(cli, &context, &mut stdin, &mut stdout, &mut stderr);
+        let exit = run_with_io(
+            cli,
+            &context,
+            secrets,
+            openai,
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
         (
             exit == ExitCode::SUCCESS,
             String::from_utf8(stdout).unwrap(),
@@ -1322,9 +1815,9 @@ mod tests {
         let command_lines: &[&[&str]] = &[
             &["nummetria", "setup"],
             &["nummetria", "status"],
-            &["nummetria", "collect"],
+            &["nummetria", "collect", "openai"],
             &["nummetria", "usage"],
-            &["nummetria", "providers"],
+            &["nummetria", "providers", "openai", "status"],
             &["nummetria", "budget"],
             &["nummetria", "import", "usage.json"],
             &["nummetria", "export", "--format", "json"],
@@ -1350,6 +1843,129 @@ mod tests {
 
         assert!(before.global.json);
         assert!(after.global.json);
+    }
+
+    #[test]
+    fn openai_credentials_are_managed_without_echoing_secret_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = PlatformPaths::from_directories(
+            directory.path().join("config"),
+            directory.path().join("data"),
+        );
+        let secrets = InMemorySecretStore::default();
+        let secret = "admin-test-key-must-not-appear";
+        let (success, output, error) = run_with_services(
+            &[
+                "nummetria",
+                "providers",
+                "openai",
+                "set-key",
+                "--from-stdin",
+            ],
+            paths.clone(),
+            EnvironmentOverrides::default(),
+            format!("{secret}\n").as_bytes(),
+            &secrets,
+            &UnavailableCollector,
+        );
+        assert!(success, "{error}");
+        assert!(!output.contains(secret));
+        assert!(!error.contains(secret));
+
+        let (success, output, error) = run_with_services(
+            &["nummetria", "--json", "providers", "openai", "status"],
+            paths.clone(),
+            EnvironmentOverrides::default(),
+            b"",
+            &secrets,
+            &UnavailableCollector,
+        );
+        assert!(success, "{error}");
+        let output: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(output["data"]["configured"], true);
+
+        let (success, output, error) = run_with_services(
+            &[
+                "nummetria",
+                "--json",
+                "providers",
+                "openai",
+                "delete-key",
+                "--yes",
+            ],
+            paths,
+            EnvironmentOverrides::default(),
+            b"",
+            &secrets,
+            &UnavailableCollector,
+        );
+        assert!(success, "{error}");
+        assert!(!output.contains(secret));
+    }
+
+    #[test]
+    fn openai_collection_uses_credentials_and_commits_checkpoints() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = PlatformPaths::from_directories(
+            directory.path().join("config"),
+            directory.path().join("data"),
+        );
+        let secrets = InMemorySecretStore::default();
+        let id = CredentialId::new("openai", "default").unwrap();
+        secrets
+            .set(&id, &SecretValue::new("admin-test-key").unwrap())
+            .unwrap();
+        let collector = RecordingCollector::default();
+        let args = [
+            "nummetria",
+            "--json",
+            "collect",
+            "openai",
+            "--start",
+            "2026-08-01",
+            "--end",
+            "2026-08-03",
+        ];
+
+        let (success, output, error) = run_with_services(
+            &args,
+            paths.clone(),
+            EnvironmentOverrides::default(),
+            b"",
+            &secrets,
+            &collector,
+        );
+        assert!(success, "{error}");
+        let output: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(output["data"]["records_inserted"], 1);
+        assert_eq!(output["data"]["usage_pages"], 2);
+
+        let (success, output, error) = run_with_services(
+            &args,
+            paths.clone(),
+            EnvironmentOverrides::default(),
+            b"",
+            &secrets,
+            &collector,
+        );
+        assert!(success, "{error}");
+        let output: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(output["data"]["records_already_present"], 1);
+        assert_eq!(
+            collector.keys.lock().unwrap().as_slice(),
+            ["admin-test-key", "admin-test-key"]
+        );
+
+        let storage = SqliteStorage::open(paths.database_file()).unwrap();
+        let provider = nummetria_core::ProviderId::new("openai").unwrap();
+        assert_eq!(
+            storage
+                .get_checkpoint(&provider, "openai.completions:default")
+                .unwrap()
+                .unwrap()
+                .cursor,
+            "2026-08-03"
+        );
     }
 
     #[test]

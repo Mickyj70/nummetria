@@ -10,6 +10,10 @@ releases begin.
 
 ### Added
 
+- Expanded v0.1 product contracts for privacy-reviewed local Codex and Claude
+  Code sources, manual subscription renewals, and explainable local anomaly
+  detection.
+
 - Initial Nummetria product website.
 - Product, architecture, privacy, scope, CLI contract, and data-model
   documentation.

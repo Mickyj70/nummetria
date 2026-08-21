@@ -12,7 +12,10 @@ nummetria
 ├── collect
 ├── usage
 ├── providers
+├── sources
 ├── budget
+├── subscription
+├── anomaly
 ├── import
 ├── export
 ├── config
@@ -50,7 +53,10 @@ nummetria
 - `collect` requests new usage from configured providers.
 - `usage` queries and groups stored usage.
 - `providers` manages and tests provider connections.
+- `sources` discovers and manages opt-in local collectors.
 - `budget` creates and checks local budgets.
+- `subscription` tracks manually entered recurring plans and renewal dates.
+- `anomaly` checks, lists, and explains deterministic usage anomalies.
 - `import` validates and stores supported exchange files.
 - `export` writes normalized JSON or CSV data.
 - `config` inspects and changes non-secret configuration.

@@ -14,7 +14,10 @@ a focused pull request with tests and documentation.
 - [x] Cross-platform configuration and native credential storage.
 - [x] OpenAI provider adapter.
 - [ ] Anthropic provider adapter.
+- [ ] Privacy-reviewed local Codex and Claude Code sources.
 - [ ] Usage reports and local budgets.
+- [ ] Manual subscription renewal tracking.
+- [ ] Explainable local usage anomaly detection.
 - [x] Database backup and deliberate data deletion.
 - [ ] Diagnostics and shell completions.
 - [ ] macOS and Windows release artifacts and installation documentation.
@@ -26,8 +29,9 @@ experience. Notch-specific interaction will be an optional presentation mode,
 not a separate source of data or business logic. A Windows tray experience will
 follow the same shared-core approach.
 
-Other candidates include scheduled collection, notifications, additional
-providers, pricing-table updates, and opt-in local integrations. Each requires a
-separate design and privacy review before entering a release milestone.
+Other candidates include Gemini and xAI provider adapters, scheduled
+collection, notifications, pricing-table updates, and more opt-in local
+integrations. Each requires a separate design and privacy review before entering
+a release milestone.
 
 See [docs/v0.1-scope.md](docs/v0.1-scope.md) for the binding initial scope.

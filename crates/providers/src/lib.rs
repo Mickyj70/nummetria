@@ -1,4 +1,5 @@
-//! AI provider adapters for Nummetria.
-//!
-//! Provider-specific API behavior will implement contracts owned by the core
-//! crate so reporting and storage remain provider-neutral.
+//! Provider adapters that normalize external usage without storing raw payloads.
+
+mod openai;
+
+pub use openai::{CollectionRange, OpenAiClient, OpenAiError, ProviderBatch, RetryPolicy};

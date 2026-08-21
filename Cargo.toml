@@ -25,6 +25,7 @@ nummetria-core = { path = "crates/core" }
 nummetria-platform = { path = "crates/platform" }
 nummetria-providers = { path = "crates/providers" }
 nummetria-storage = { path = "crates/storage" }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rust_decimal = { version = "1", default-features = false, features = ["serde-with-str", "std"] }
 rusqlite = { version = "0.40", features = ["backup", "bundled"] }
 serde = { version = "1", features = ["derive"] }

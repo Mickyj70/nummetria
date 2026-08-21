@@ -69,3 +69,6 @@ contracts from the first implementation onward.
 Configuration precedence, operating-system paths, native credential handling,
 setup, configuration inspection, backup, and deliberate data deletion are
 defined in [Configuration, paths, and credentials](configuration.md).
+
+The OpenAI credential, collection, normalization, pagination, retry, and
+checkpoint contract is defined in [OpenAI provider](providers/openai.md).

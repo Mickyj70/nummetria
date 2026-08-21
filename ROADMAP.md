@@ -12,7 +12,7 @@ a focused pull request with tests and documentation.
 - [x] SQLite storage, migrations, deduplication, and checkpoints.
 - [x] JSON import plus JSON and CSV export.
 - [x] Cross-platform configuration and native credential storage.
-- [ ] OpenAI provider adapter.
+- [x] OpenAI provider adapter.
 - [ ] Anthropic provider adapter.
 - [ ] Usage reports and local budgets.
 - [x] Database backup and deliberate data deletion.

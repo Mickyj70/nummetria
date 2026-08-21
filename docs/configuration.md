@@ -20,8 +20,8 @@ file may be absent; defaults still work. A path selected explicitly with
 
 API keys, tokens, passwords, prompts, and responses are never valid
 configuration fields. Provider credentials live only in macOS Keychain or
-Windows Credential Manager. Configuration will eventually hold credential
-references, never credential values.
+Windows Credential Manager. Provider profiles select native credential entries
+without placing credential values in configuration.
 
 ## Resolution and precedence
 

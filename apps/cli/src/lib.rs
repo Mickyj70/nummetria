@@ -849,6 +849,14 @@ fn run_collect_openai(
     let collected_at = DateTime::<Utc>::from(std::time::SystemTime::now());
     let default_end = collected_at.date_naive();
     let end_date = parse_date_option(args.end.as_deref())?.unwrap_or(default_end);
+    let requested_start = parse_date_option(args.start.as_deref())?;
+    if requested_start.is_some_and(|start| start >= end_date) {
+        return Err(CliFailure::new(
+            EXIT_INVALID_INPUT,
+            "invalid_date_range",
+            "collection end must be later than collection start",
+        ));
+    }
 
     let mut storage = open_database(global, context)?;
     let provider = nummetria_core::ProviderId::new("openai")
@@ -863,10 +871,12 @@ fn run_collect_openai(
         .map_err(storage_failure)?;
     let default_start = checkpoint_start(&usage_checkpoint, &costs_checkpoint)
         .unwrap_or(end_date - Duration::days(30));
-    let start_date = parse_date_option(args.start.as_deref())?.unwrap_or(default_start);
+    let start_date = requested_start.unwrap_or(default_start);
     let start = utc_midnight(start_date)?;
     let end = utc_midnight(end_date)?;
-    let range = CollectionRange::new(start, end).map_err(provider_failure)?;
+    let range = CollectionRange::new(start, end).map_err(|error| {
+        CliFailure::new(EXIT_INVALID_INPUT, "invalid_date_range", error.to_string())
+    })?;
 
     let batch = openai
         .collect(credential.expose_secret(), &range, collected_at)
@@ -1576,7 +1586,12 @@ fn secret_failure(error: SecretError) -> CliFailure {
 }
 
 fn provider_failure(error: OpenAiError) -> CliFailure {
-    CliFailure::new(EXIT_PROVIDER, "provider_failure", error.to_string())
+    let exit_code = if matches!(error, OpenAiError::InvalidRange) {
+        EXIT_INVALID_INPUT
+    } else {
+        EXIT_PROVIDER
+    };
+    CliFailure::new(exit_code, "provider_failure", error.to_string())
 }
 
 fn configuration_failure(error: ConfigError) -> CliFailure {
@@ -1973,6 +1988,41 @@ mod tests {
                 .windows(b"admin-test-key".len())
                 .any(|window| window == b"admin-test-key")
         );
+    }
+
+    #[test]
+    fn invalid_openai_range_does_not_create_a_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = PlatformPaths::from_directories(
+            directory.path().join("config"),
+            directory.path().join("data"),
+        );
+        let secrets = InMemorySecretStore::default();
+        let id = CredentialId::new("openai", "default").unwrap();
+        secrets
+            .set(&id, &SecretValue::new("admin-test-key").unwrap())
+            .unwrap();
+
+        let (success, _, error) = run_with_services(
+            &[
+                "nummetria",
+                "collect",
+                "openai",
+                "--start",
+                "2026-08-03",
+                "--end",
+                "2026-08-03",
+            ],
+            paths.clone(),
+            EnvironmentOverrides::default(),
+            b"",
+            &secrets,
+            &RecordingCollector::default(),
+        );
+
+        assert!(!success);
+        assert!(error.contains("end must be later"));
+        assert!(!paths.database_file().exists());
     }
 
     #[test]

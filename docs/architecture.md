@@ -12,7 +12,9 @@ CLI commands
 Application services
     │
     ├── Domain types and policies
-    ├── Provider adapter contract ── OpenAI / Anthropic
+    ├── Collection contracts
+    │   ├── Provider adapters ────── OpenAI / Anthropic
+    │   └── Local sources ────────── Codex / Claude Code
     ├── Storage contract ─────────── SQLite
     └── Platform contract ────────── Keychain / Credential Manager / paths
 ```
@@ -31,6 +33,11 @@ provider, database, terminal, or desktop framework.
 - `crates/platform`: configuration paths and native secret storage.
 - `crates/providers`: provider contract plus OpenAI and Anthropic adapters.
 
+A provider is an authenticated external service. A source describes where an
+observation came from, including a provider API, a privacy-reviewed local tool,
+or an imported exchange file. Local sources must not read prompts or responses;
+their supported metadata is documented before implementation.
+
 The boundaries may become separate crates gradually. They should not be split
 solely to create more packages; a boundary earns a crate when it has a clear
 contract and independent tests.
@@ -38,11 +45,16 @@ contract and independent tests.
 ## Data flow
 
 1. A command resolves configuration and credentials.
-2. An importer or provider adapter produces validated domain records.
+2. An importer, provider adapter, or local source produces validated domain
+   records.
 3. Storage inserts records using deterministic identities and a transaction.
 4. A collection checkpoint advances only after the transaction commits.
 5. Reports query normalized data and retain cost-evidence labels.
 6. The CLI renders either human-readable output or a versioned JSON envelope.
+7. Subscription records remain separate from metered usage so reports never
+   present a recurring fee as provider-reported token cost.
+8. Anomaly rules evaluate stored history locally and retain an explanation of
+   the baseline, threshold, and observation that triggered them.
 
 ## Reliability rules
 

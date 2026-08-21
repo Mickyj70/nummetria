@@ -15,6 +15,7 @@ path = "src/main.rs"
 clap.workspace = true
 csv.workspace = true
 nummetria-core.workspace = true
+nummetria-platform.workspace = true
 nummetria-storage.workspace = true
 rust_decimal.workspace = true
 serde.workspace = true

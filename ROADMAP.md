@@ -11,11 +11,12 @@ a focused pull request with tests and documentation.
 - [x] Provider-neutral domain model and versioned schemas.
 - [x] SQLite storage, migrations, deduplication, and checkpoints.
 - [x] JSON import plus JSON and CSV export.
-- [ ] Cross-platform configuration and native credential storage.
+- [x] Cross-platform configuration and native credential storage.
 - [ ] OpenAI provider adapter.
 - [ ] Anthropic provider adapter.
 - [ ] Usage reports and local budgets.
-- [ ] Diagnostics, completions, backup, and deletion.
+- [x] Database backup and deliberate data deletion.
+- [ ] Diagnostics and shell completions.
 - [ ] macOS and Windows release artifacts and installation documentation.
 
 ## After v0.1

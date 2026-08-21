@@ -1,0 +1,17 @@
+{
+  "data": [{
+    "starting_at": "2026-08-02T00:00:00Z",
+    "ending_at": "2026-08-03T00:00:00Z",
+    "results": [{
+      "uncached_input_tokens": 2000,
+      "output_tokens": 500,
+      "cache_read_input_tokens": 0,
+      "cache_creation": {},
+      "server_tool_use": {},
+      "workspace_id": "wrkspc_alpha",
+      "model": "claude-sonnet-4-20250514"
+    }]
+  }],
+  "has_more": false,
+  "next_page": null
+}

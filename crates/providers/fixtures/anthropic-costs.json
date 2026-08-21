@@ -1,0 +1,14 @@
+{
+  "data": [{
+    "starting_at": "2026-08-01T00:00:00Z",
+    "ending_at": "2026-08-02T00:00:00Z",
+    "results": [{
+      "amount": "0.060125",
+      "currency": "USD",
+      "workspace_id": "wrkspc_alpha",
+      "description": "Claude Sonnet usage"
+    }]
+  }],
+  "has_more": false,
+  "next_page": null
+}

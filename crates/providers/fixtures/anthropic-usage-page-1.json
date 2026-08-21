@@ -1,0 +1,20 @@
+{
+  "data": [{
+    "starting_at": "2026-08-01T00:00:00Z",
+    "ending_at": "2026-08-02T00:00:00Z",
+    "results": [{
+      "uncached_input_tokens": 1000,
+      "output_tokens": 250,
+      "cache_read_input_tokens": 400,
+      "cache_creation": {
+        "ephemeral_5m_input_tokens": 20,
+        "ephemeral_1h_input_tokens": 5
+      },
+      "server_tool_use": { "web_search_requests": 2 },
+      "workspace_id": "wrkspc_alpha",
+      "model": "claude-sonnet-4-20250514"
+    }]
+  }],
+  "has_more": true,
+  "next_page": "usage-page-2"
+}

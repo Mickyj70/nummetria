@@ -13,7 +13,9 @@ use nummetria_platform::{
     PlatformPaths, ResolveOptions, ResolvedConfig, SecretError, SecretStore, SecretValue,
     SetupOutcome, resolve_config, write_initial_config,
 };
-use nummetria_providers::{CollectionRange, OpenAiClient, OpenAiError, ProviderBatch};
+use nummetria_providers::{
+    AnthropicClient, AnthropicError, CollectionRange, OpenAiClient, OpenAiError, ProviderBatch,
+};
 use nummetria_storage::{
     CollectionCheckpoint, SqliteStorage, StorageError, UsageAggregate, UsageQuery,
 };
@@ -141,6 +143,9 @@ pub enum ProvidersCommand {
     #[command(name = "openai")]
     /// Manage the OpenAI admin credential.
     OpenAi(OpenAiProviderArgs),
+    #[command(name = "anthropic")]
+    /// Manage the Anthropic admin credential.
+    Anthropic(AnthropicProviderArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -175,6 +180,37 @@ pub enum OpenAiProviderCommand {
 }
 
 #[derive(Debug, clap::Args)]
+pub struct AnthropicProviderArgs {
+    #[command(subcommand)]
+    pub command: AnthropicProviderCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AnthropicProviderCommand {
+    /// Store an Anthropic admin key in the native credential store.
+    SetKey {
+        #[arg(long, default_value = "default")]
+        profile: String,
+        /// Read the key from standard input instead of a hidden terminal prompt.
+        #[arg(long)]
+        from_stdin: bool,
+    },
+    /// Report whether a credential exists without revealing it.
+    Status {
+        #[arg(long, default_value = "default")]
+        profile: String,
+    },
+    /// Remove an Anthropic credential from the native store.
+    DeleteKey {
+        #[arg(long, default_value = "default")]
+        profile: String,
+        /// Skip the interactive confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, clap::Args)]
 pub struct CollectArgs {
     #[command(subcommand)]
     pub command: CollectCommand,
@@ -185,10 +221,25 @@ pub enum CollectCommand {
     #[command(name = "openai")]
     /// Collect OpenAI organization usage and costs.
     OpenAi(OpenAiCollectArgs),
+    #[command(name = "anthropic")]
+    /// Collect Anthropic organization usage and costs.
+    Anthropic(AnthropicCollectArgs),
 }
 
 #[derive(Debug, clap::Args)]
 pub struct OpenAiCollectArgs {
+    #[arg(long, default_value = "default")]
+    pub profile: String,
+    /// Inclusive UTC start date.
+    #[arg(long, value_name = "YYYY-MM-DD")]
+    pub start: Option<String>,
+    /// Exclusive UTC end date.
+    #[arg(long, value_name = "YYYY-MM-DD")]
+    pub end: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct AnthropicCollectArgs {
     #[arg(long, default_value = "default")]
     pub profile: String,
     /// Inclusive UTC start date.
@@ -381,6 +432,11 @@ struct RuntimeContext {
     environment: EnvironmentOverrides,
 }
 
+struct ProviderServices<'a> {
+    openai: &'a dyn OpenAiCollect,
+    anthropic: &'a dyn AnthropicCollect,
+}
+
 trait OpenAiCollect: Send + Sync {
     fn collect(
         &self,
@@ -398,6 +454,26 @@ impl OpenAiCollect for OpenAiClient {
         collected_at: DateTime<Utc>,
     ) -> Result<ProviderBatch, OpenAiError> {
         OpenAiClient::collect(self, admin_key, range, collected_at)
+    }
+}
+
+trait AnthropicCollect: Send + Sync {
+    fn collect(
+        &self,
+        admin_key: &str,
+        range: &CollectionRange,
+        collected_at: DateTime<Utc>,
+    ) -> Result<ProviderBatch, AnthropicError>;
+}
+
+impl AnthropicCollect for AnthropicClient {
+    fn collect(
+        &self,
+        admin_key: &str,
+        range: &CollectionRange,
+        collected_at: DateTime<Utc>,
+    ) -> Result<ProviderBatch, AnthropicError> {
+        AnthropicClient::collect(self, admin_key, range, collected_at)
     }
 }
 
@@ -489,11 +565,22 @@ pub fn run() -> ExitCode {
             return ExitCode::from(failure.exit_code);
         }
     };
+    let anthropic = match AnthropicClient::new() {
+        Ok(client) => client,
+        Err(error) => {
+            let failure = anthropic_provider_failure(error);
+            render_failure(&cli.global, command, &failure, &mut stderr);
+            return ExitCode::from(failure.exit_code);
+        }
+    };
     run_with_io(
         cli,
         &context,
         &secrets,
-        &openai,
+        ProviderServices {
+            openai: &openai,
+            anthropic: &anthropic,
+        },
         &mut io::stdin().lock(),
         &mut stdout,
         &mut stderr,
@@ -504,7 +591,7 @@ fn run_with_io(
     cli: Cli,
     context: &RuntimeContext,
     secrets: &dyn SecretStore,
-    openai: &dyn OpenAiCollect,
+    providers: ProviderServices<'_>,
     stdin: &mut dyn BufRead,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
@@ -522,7 +609,15 @@ fn run_with_io(
         Command::Config(args) => run_config(&cli.global, args, context, stdout),
         Command::Data(args) => run_data(&cli.global, args, context, stdin, stdout),
         Command::Providers(args) => run_providers(&cli.global, args, secrets, stdin, stdout),
-        Command::Collect(args) => run_collect(&cli.global, args, context, secrets, openai, stdout),
+        Command::Collect(args) => run_collect(
+            &cli.global,
+            args,
+            context,
+            secrets,
+            providers.openai,
+            providers.anthropic,
+            stdout,
+        ),
         Command::Import(args) => run_import(&cli.global, args, context, stdout, stderr),
         Command::Status => run_status(&cli.global, context, stdout),
         Command::Usage => run_usage(&cli.global, context, stdout),
@@ -738,12 +833,16 @@ fn run_providers(
                 };
                 let value = SecretValue::new(value).map_err(secret_failure)?;
                 secrets.set(&id, &value).map_err(secret_failure)?;
-                render_credential_summary(global, profile, true, "stored", stdout)
+                render_credential_summary(
+                    global, "openai", "OpenAI", profile, true, "stored", stdout,
+                )
             }
             OpenAiProviderCommand::Status { profile } => {
                 let id = openai_credential_id(profile)?;
                 let configured = secrets.get(&id).map_err(secret_failure)?.is_some();
-                render_credential_summary(global, profile, configured, "checked", stdout)
+                render_credential_summary(
+                    global, "openai", "OpenAI", profile, configured, "checked", stdout,
+                )
             }
             OpenAiProviderCommand::DeleteKey { profile, yes } => {
                 if global.json && !yes {
@@ -778,7 +877,103 @@ fn run_providers(
                 }
                 let id = openai_credential_id(profile)?;
                 secrets.delete(&id).map_err(secret_failure)?;
-                render_credential_summary(global, profile, false, "deleted", stdout)
+                render_credential_summary(
+                    global, "openai", "OpenAI", profile, false, "deleted", stdout,
+                )
+            }
+        },
+        ProvidersCommand::Anthropic(args) => match &args.command {
+            AnthropicProviderCommand::SetKey {
+                profile,
+                from_stdin,
+            } => {
+                let id = anthropic_credential_id(profile)?;
+                let value = if *from_stdin {
+                    let mut value = String::new();
+                    stdin.read_line(&mut value).map_err(|error| {
+                        CliFailure::new(
+                            EXIT_FILE_IO,
+                            "input_io",
+                            format!("could not read credential: {error}"),
+                        )
+                    })?;
+                    value.trim_end_matches(['\r', '\n']).to_owned()
+                } else {
+                    rpassword::prompt_password("Anthropic admin key: ").map_err(|error| {
+                        CliFailure::new(
+                            EXIT_FILE_IO,
+                            "input_io",
+                            format!("could not read hidden credential: {error}"),
+                        )
+                    })?
+                };
+                let value = SecretValue::new(value).map_err(secret_failure)?;
+                secrets.set(&id, &value).map_err(secret_failure)?;
+                render_credential_summary(
+                    global,
+                    "anthropic",
+                    "Anthropic",
+                    profile,
+                    true,
+                    "stored",
+                    stdout,
+                )
+            }
+            AnthropicProviderCommand::Status { profile } => {
+                let id = anthropic_credential_id(profile)?;
+                let configured = secrets.get(&id).map_err(secret_failure)?.is_some();
+                render_credential_summary(
+                    global,
+                    "anthropic",
+                    "Anthropic",
+                    profile,
+                    configured,
+                    "checked",
+                    stdout,
+                )
+            }
+            AnthropicProviderCommand::DeleteKey { profile, yes } => {
+                if global.json && !yes {
+                    return Err(CliFailure::new(
+                        EXIT_INVALID_INPUT,
+                        "confirmation_required",
+                        "providers anthropic delete-key with --json requires --yes",
+                    ));
+                }
+                if !yes {
+                    write!(
+                        stdout,
+                        "Delete the Anthropic credential for profile '{profile}'? Type 'delete' to continue: "
+                    )
+                    .and_then(|()| stdout.flush())
+                    .map_err(output_failure)?;
+                    let mut confirmation = String::new();
+                    stdin.read_line(&mut confirmation).map_err(|error| {
+                        CliFailure::new(
+                            EXIT_FILE_IO,
+                            "input_io",
+                            format!("could not read confirmation: {error}"),
+                        )
+                    })?;
+                    if confirmation.trim() != "delete" {
+                        return Err(CliFailure::new(
+                            EXIT_INVALID_INPUT,
+                            "confirmation_required",
+                            "credential deletion cancelled",
+                        ));
+                    }
+                }
+                let id = anthropic_credential_id(profile)?;
+                secrets.delete(&id).map_err(secret_failure)?;
+                render_credential_summary(
+                    global,
+                    "anthropic",
+                    "Anthropic",
+                    profile,
+                    false,
+                    "deleted",
+                    stdout,
+                )
             }
         },
     }
@@ -786,13 +981,15 @@ fn run_providers(
 
 fn render_credential_summary(
     global: &GlobalOptions,
+    provider: &'static str,
+    display_name: &str,
     profile: &str,
     configured: bool,
     action: &str,
     stdout: &mut dyn Write,
 ) -> Result<(), CliFailure> {
     let summary = CredentialSummary {
-        provider: "openai",
+        provider,
         profile: profile.to_owned(),
         configured,
     };
@@ -803,7 +1000,7 @@ fn render_credential_summary(
     } else {
         writeln!(
             stdout,
-            "OpenAI profile '{profile}' {action}; credential configured: {configured}."
+            "{display_name} profile '{profile}' {action}; credential configured: {configured}."
         )
         .map_err(output_failure)
     }
@@ -815,11 +1012,15 @@ fn run_collect(
     context: &RuntimeContext,
     secrets: &dyn SecretStore,
     openai: &dyn OpenAiCollect,
+    anthropic: &dyn AnthropicCollect,
     stdout: &mut dyn Write,
 ) -> Result<(), CliFailure> {
     match &args.command {
         CollectCommand::OpenAi(args) => {
             run_collect_openai(global, args, context, secrets, openai, stdout)
+        }
+        CollectCommand::Anthropic(args) => {
+            run_collect_anthropic(global, args, context, secrets, anthropic, stdout)
         }
     }
 }
@@ -935,6 +1136,120 @@ fn run_collect_openai(
 
 fn openai_credential_id(profile: &str) -> Result<CredentialId, CliFailure> {
     CredentialId::new("openai", profile)
+        .map_err(|error| CliFailure::new(EXIT_INVALID_INPUT, "invalid_profile", error.to_string()))
+}
+
+fn run_collect_anthropic(
+    global: &GlobalOptions,
+    args: &AnthropicCollectArgs,
+    context: &RuntimeContext,
+    secrets: &dyn SecretStore,
+    anthropic: &dyn AnthropicCollect,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    let credential_id = anthropic_credential_id(&args.profile)?;
+    let credential = secrets
+        .get(&credential_id)
+        .map_err(secret_failure)?
+        .ok_or_else(|| {
+            CliFailure::new(
+                EXIT_INVALID_INPUT,
+                "credential_missing",
+                format!(
+                    "Anthropic profile '{}' has no admin credential; run providers anthropic set-key",
+                    args.profile
+                ),
+            )
+        })?;
+    let collected_at = DateTime::<Utc>::from(std::time::SystemTime::now());
+    let default_end = collected_at.date_naive();
+    let end_date = parse_date_option(args.end.as_deref())?.unwrap_or(default_end);
+    let requested_start = parse_date_option(args.start.as_deref())?;
+    if requested_start.is_some_and(|start| start >= end_date) {
+        return Err(CliFailure::new(
+            EXIT_INVALID_INPUT,
+            "invalid_date_range",
+            "collection end must be later than collection start",
+        ));
+    }
+
+    let mut storage = open_database(global, context)?;
+    let provider = nummetria_core::ProviderId::new("anthropic")
+        .map_err(|error| CliFailure::new(EXIT_PROVIDER, "provider_failure", error.to_string()))?;
+    let usage_stream = format!("anthropic.messages:{}", args.profile);
+    let costs_stream = format!("anthropic.costs:{}", args.profile);
+    let usage_checkpoint = storage
+        .get_checkpoint(&provider, &usage_stream)
+        .map_err(storage_failure)?;
+    let costs_checkpoint = storage
+        .get_checkpoint(&provider, &costs_stream)
+        .map_err(storage_failure)?;
+    let default_start = checkpoint_start(&usage_checkpoint, &costs_checkpoint)
+        .unwrap_or(end_date - Duration::days(30));
+    let start_date = requested_start.unwrap_or(default_start);
+    let start = utc_midnight(start_date)?;
+    let end = utc_midnight(end_date)?;
+    let range = CollectionRange::new(start, end).map_err(|error| {
+        CliFailure::new(EXIT_INVALID_INPUT, "invalid_date_range", error.to_string())
+    })?;
+
+    let batch = anthropic
+        .collect(credential.expose_secret(), &range, collected_at)
+        .map_err(anthropic_provider_failure)?;
+    let end_cursor = end_date.format("%Y-%m-%d").to_string();
+    let checkpoints = vec![
+        advanced_checkpoint(
+            &provider,
+            usage_stream,
+            usage_checkpoint,
+            &end_cursor,
+            collected_at,
+        ),
+        advanced_checkpoint(
+            &provider,
+            costs_stream,
+            costs_checkpoint,
+            &end_cursor,
+            collected_at,
+        ),
+    ];
+    let observations_read = batch.records.len();
+    let inserted = storage
+        .insert_usage_records_with_checkpoints(&batch.records, &checkpoints)
+        .map_err(storage_failure)?;
+    let summary = CollectSummary {
+        provider: "anthropic",
+        profile: args.profile.clone(),
+        start: start_date.format("%Y-%m-%d").to_string(),
+        end: end_cursor,
+        usage_pages: batch.usage_pages,
+        cost_pages: batch.cost_pages,
+        observations_read,
+        records_inserted: inserted.inserted,
+        records_already_present: inserted.already_present,
+    };
+    if global.json {
+        render_json_success("collect", summary, Vec::new(), stdout)
+    } else if global.quiet {
+        Ok(())
+    } else {
+        writeln!(
+            stdout,
+            "Collected Anthropic {}..{}: {} observation(s), {} inserted, {} already present ({} usage page(s), {} cost page(s)).",
+            summary.start,
+            summary.end,
+            summary.observations_read,
+            summary.records_inserted,
+            summary.records_already_present,
+            summary.usage_pages,
+            summary.cost_pages,
+        )
+        .map_err(output_failure)
+    }
+}
+
+fn anthropic_credential_id(profile: &str) -> Result<CredentialId, CliFailure> {
+    CredentialId::new("anthropic", profile)
         .map_err(|error| CliFailure::new(EXIT_INVALID_INPUT, "invalid_profile", error.to_string()))
 }
 
@@ -1594,6 +1909,10 @@ fn provider_failure(error: OpenAiError) -> CliFailure {
     CliFailure::new(exit_code, "provider_failure", error.to_string())
 }
 
+fn anthropic_provider_failure(error: AnthropicError) -> CliFailure {
+    CliFailure::new(EXIT_PROVIDER, "provider_failure", error.to_string())
+}
+
 fn configuration_failure(error: ConfigError) -> CliFailure {
     let message = match &error {
         ConfigError::Parse { path, .. } => {
@@ -1733,6 +2052,19 @@ mod tests {
         }
     }
 
+    struct UnavailableAnthropicCollector;
+
+    impl AnthropicCollect for UnavailableAnthropicCollector {
+        fn collect(
+            &self,
+            _admin_key: &str,
+            _range: &CollectionRange,
+            _collected_at: DateTime<Utc>,
+        ) -> Result<ProviderBatch, AnthropicError> {
+            Err(AnthropicError::Transport)
+        }
+    }
+
     #[derive(Default)]
     struct RecordingCollector {
         keys: Mutex<Vec<String>>,
@@ -1752,6 +2084,35 @@ mod tests {
             .unwrap();
             Ok(ProviderBatch {
                 records: exchange.records,
+                usage_pages: 2,
+                cost_pages: 1,
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingAnthropicCollector {
+        keys: Mutex<Vec<String>>,
+    }
+
+    impl AnthropicCollect for RecordingAnthropicCollector {
+        fn collect(
+            &self,
+            admin_key: &str,
+            _range: &CollectionRange,
+            _collected_at: DateTime<Utc>,
+        ) -> Result<ProviderBatch, AnthropicError> {
+            self.keys.lock().unwrap().push(admin_key.to_owned());
+            let mut record = UsageExchange::from_json_str(include_str!(
+                "../../../fixtures/exchange/valid-v1.json"
+            ))
+            .unwrap()
+            .records
+            .remove(0);
+            record.provider = nummetria_core::ProviderId::new("anthropic").unwrap();
+            record.id = nummetria_core::RecordId::new("anthropic:test-record").unwrap();
+            Ok(ProviderBatch {
+                records: vec![record],
                 usage_pages: 2,
                 cost_pages: 1,
             })
@@ -1808,7 +2169,44 @@ mod tests {
             cli,
             &context,
             secrets,
-            openai,
+            ProviderServices {
+                openai,
+                anthropic: &UnavailableAnthropicCollector,
+            },
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+        (
+            exit == ExitCode::SUCCESS,
+            String::from_utf8(stdout).unwrap(),
+            String::from_utf8(stderr).unwrap(),
+        )
+    }
+
+    fn run_with_anthropic_services(
+        args: &[&str],
+        paths: PlatformPaths,
+        input: &[u8],
+        secrets: &dyn SecretStore,
+        anthropic: &dyn AnthropicCollect,
+    ) -> (bool, String, String) {
+        let cli = Cli::try_parse_from(args).unwrap();
+        let context = RuntimeContext {
+            paths,
+            environment: EnvironmentOverrides::default(),
+        };
+        let mut stdin = io::Cursor::new(input);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = run_with_io(
+            cli,
+            &context,
+            secrets,
+            ProviderServices {
+                openai: &UnavailableCollector,
+                anthropic,
+            },
             &mut stdin,
             &mut stdout,
             &mut stderr,
@@ -1831,8 +2229,10 @@ mod tests {
             &["nummetria", "setup"],
             &["nummetria", "status"],
             &["nummetria", "collect", "openai"],
+            &["nummetria", "collect", "anthropic"],
             &["nummetria", "usage"],
             &["nummetria", "providers", "openai", "status"],
+            &["nummetria", "providers", "anthropic", "status"],
             &["nummetria", "budget"],
             &["nummetria", "import", "usage.json"],
             &["nummetria", "export", "--format", "json"],
@@ -1987,6 +2387,74 @@ mod tests {
             !database_bytes
                 .windows(b"admin-test-key".len())
                 .any(|window| window == b"admin-test-key")
+        );
+    }
+
+    #[test]
+    fn anthropic_credentials_and_collection_are_secret_safe() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = PlatformPaths::from_directories(
+            directory.path().join("config"),
+            directory.path().join("data"),
+        );
+        let secrets = InMemorySecretStore::default();
+        let secret = "anthropic-admin-test-key";
+        let (success, output, error) = run_with_anthropic_services(
+            &[
+                "nummetria",
+                "providers",
+                "anthropic",
+                "set-key",
+                "--from-stdin",
+            ],
+            paths.clone(),
+            format!("{secret}\n").as_bytes(),
+            &secrets,
+            &UnavailableAnthropicCollector,
+        );
+        assert!(success, "{error}");
+        assert!(!output.contains(secret));
+        assert!(!error.contains(secret));
+
+        let collector = RecordingAnthropicCollector::default();
+        let (success, output, error) = run_with_anthropic_services(
+            &[
+                "nummetria",
+                "--json",
+                "collect",
+                "anthropic",
+                "--start",
+                "2026-08-01",
+                "--end",
+                "2026-08-03",
+            ],
+            paths.clone(),
+            b"",
+            &secrets,
+            &collector,
+        );
+        assert!(success, "{error}");
+        let output: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(output["data"]["provider"], "anthropic");
+        assert_eq!(output["data"]["records_inserted"], 1);
+        assert_eq!(collector.keys.lock().unwrap().as_slice(), [secret]);
+
+        let storage = SqliteStorage::open(paths.database_file()).unwrap();
+        let provider = nummetria_core::ProviderId::new("anthropic").unwrap();
+        assert_eq!(
+            storage
+                .get_checkpoint(&provider, "anthropic.messages:default")
+                .unwrap()
+                .unwrap()
+                .cursor,
+            "2026-08-03"
+        );
+        drop(storage);
+        let database_bytes = std::fs::read(paths.database_file()).unwrap();
+        assert!(
+            !database_bytes
+                .windows(secret.len())
+                .any(|value| value == secret.as_bytes())
         );
     }
 

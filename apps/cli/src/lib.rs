@@ -2417,27 +2417,29 @@ mod tests {
         assert!(!error.contains(secret));
 
         let collector = RecordingAnthropicCollector::default();
-        let (success, output, error) = run_with_anthropic_services(
-            &[
-                "nummetria",
-                "--json",
-                "collect",
-                "anthropic",
-                "--start",
-                "2026-08-01",
-                "--end",
-                "2026-08-03",
-            ],
-            paths.clone(),
-            b"",
-            &secrets,
-            &collector,
-        );
+        let args = [
+            "nummetria",
+            "--json",
+            "collect",
+            "anthropic",
+            "--start",
+            "2026-08-01",
+            "--end",
+            "2026-08-03",
+        ];
+        let (success, output, error) =
+            run_with_anthropic_services(&args, paths.clone(), b"", &secrets, &collector);
         assert!(success, "{error}");
         let output: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(output["data"]["provider"], "anthropic");
         assert_eq!(output["data"]["records_inserted"], 1);
-        assert_eq!(collector.keys.lock().unwrap().as_slice(), [secret]);
+
+        let (success, output, error) =
+            run_with_anthropic_services(&args, paths.clone(), b"", &secrets, &collector);
+        assert!(success, "{error}");
+        let output: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(output["data"]["records_already_present"], 1);
+        assert_eq!(collector.keys.lock().unwrap().as_slice(), [secret, secret]);
 
         let storage = SqliteStorage::open(paths.database_file()).unwrap();
         let provider = nummetria_core::ProviderId::new("anthropic").unwrap();
@@ -2456,6 +2458,40 @@ mod tests {
                 .windows(secret.len())
                 .any(|value| value == secret.as_bytes())
         );
+    }
+
+    #[test]
+    fn invalid_anthropic_range_does_not_create_a_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = PlatformPaths::from_directories(
+            directory.path().join("config"),
+            directory.path().join("data"),
+        );
+        let secrets = InMemorySecretStore::default();
+        let id = CredentialId::new("anthropic", "default").unwrap();
+        secrets
+            .set(&id, &SecretValue::new("anthropic-admin-test-key").unwrap())
+            .unwrap();
+
+        let (success, _, error) = run_with_anthropic_services(
+            &[
+                "nummetria",
+                "collect",
+                "anthropic",
+                "--start",
+                "2026-08-03",
+                "--end",
+                "2026-08-03",
+            ],
+            paths.clone(),
+            b"",
+            &secrets,
+            &RecordingAnthropicCollector::default(),
+        );
+
+        assert!(!success);
+        assert!(error.contains("end must be later"));
+        assert!(!paths.database_file().exists());
     }
 
     #[test]

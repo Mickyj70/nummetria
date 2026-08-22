@@ -73,8 +73,8 @@ cargo test --workspace
 ```
 
 All public v0.1 command names appear in help. Setup, configuration inspection,
-local data operations, OpenAI credential and collection commands, import,
-status, usage, export, and version now work; the remaining commands
+local data operations, OpenAI and Anthropic credential and collection commands,
+import, status, usage, export, and version now work; the remaining commands
 intentionally stay unavailable until their focused feature branches land. Data
 commands discover an operating-system-standard database by default.
 `--database`, `NUMMETRIA_DATABASE`, or TOML can select another path.

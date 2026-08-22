@@ -41,3 +41,6 @@ releases begin.
 - Paginated OpenAI completions usage and organization cost collection with
   bounded retries, deterministic records, reported cost evidence, and atomic
   checkpoints.
+- Anthropic Admin API credential management plus paginated Messages usage and
+  cost collection with cache and web-search normalization, sanitized failures,
+  deterministic records, and atomic checkpoints.

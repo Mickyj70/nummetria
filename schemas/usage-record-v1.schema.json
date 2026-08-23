@@ -127,6 +127,16 @@
         {
           "type": "object",
           "additionalProperties": false,
+          "required": ["kind", "tool", "source_id"],
+          "properties": {
+            "kind": { "const": "local_tool" },
+            "tool": { "type": "string", "minLength": 1 },
+            "source_id": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
           "required": ["kind", "format", "source_name"],
           "properties": {
             "kind": { "const": "import" },

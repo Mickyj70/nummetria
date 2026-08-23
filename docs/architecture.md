@@ -35,8 +35,9 @@ provider, database, terminal, or desktop framework.
 
 A provider is an authenticated external service. A source describes where an
 observation came from, including a provider API, a privacy-reviewed local tool,
-or an imported exchange file. Local sources must not read prompts or responses;
-their supported metadata is documented before implementation.
+or an imported exchange file. Local sources must not materialize, return,
+retain, log, or store prompts or responses; their exact scan boundary and
+supported metadata are documented before implementation.
 
 The boundaries may become separate crates gradually. They should not be split
 solely to create more packages; a boundary earns a crate when it has a clear

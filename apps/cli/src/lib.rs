@@ -16,6 +16,7 @@ use nummetria_platform::{
 use nummetria_providers::{
     AnthropicClient, AnthropicError, CollectionRange, OpenAiClient, OpenAiError, ProviderBatch,
 };
+use nummetria_sources::codex::{self, CodexSourceError};
 use nummetria_storage::{
     CollectionCheckpoint, SqliteStorage, StorageError, UsageAggregate, UsageQuery,
 };
@@ -224,6 +225,9 @@ pub enum CollectCommand {
     #[command(name = "anthropic")]
     /// Collect Anthropic organization usage and costs.
     Anthropic(AnthropicCollectArgs),
+    #[command(name = "codex")]
+    /// Collect token usage from local Codex rollout files without reading content fields.
+    Codex(CodexCollectArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -242,6 +246,19 @@ pub struct OpenAiCollectArgs {
 pub struct AnthropicCollectArgs {
     #[arg(long, default_value = "default")]
     pub profile: String,
+    /// Inclusive UTC start date.
+    #[arg(long, value_name = "YYYY-MM-DD")]
+    pub start: Option<String>,
+    /// Exclusive UTC end date.
+    #[arg(long, value_name = "YYYY-MM-DD")]
+    pub end: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct CodexCollectArgs {
+    /// Override the Codex home directory (otherwise CODEX_HOME or ~/.codex).
+    #[arg(long, value_name = "PATH")]
+    pub codex_home: Option<PathBuf>,
     /// Inclusive UTC start date.
     #[arg(long, value_name = "YYYY-MM-DD")]
     pub start: Option<String>,
@@ -427,6 +444,15 @@ struct CollectSummary {
     records_already_present: usize,
 }
 
+#[derive(Debug, Serialize)]
+struct CodexCollectSummary {
+    source: &'static str,
+    files_scanned: usize,
+    observations_read: usize,
+    records_inserted: usize,
+    records_already_present: usize,
+}
+
 struct RuntimeContext {
     paths: PlatformPaths,
     environment: EnvironmentOverrides,
@@ -495,6 +521,8 @@ struct CsvRecord {
     source_operation: String,
     source_format: String,
     source_name: String,
+    source_tool: String,
+    source_id: String,
     input_tokens: String,
     output_tokens: String,
     cached_tokens: String,
@@ -1022,6 +1050,95 @@ fn run_collect(
         CollectCommand::Anthropic(args) => {
             run_collect_anthropic(global, args, context, secrets, anthropic, stdout)
         }
+        CollectCommand::Codex(args) => run_collect_codex(global, args, context, stdout),
+    }
+}
+
+fn run_collect_codex(
+    global: &GlobalOptions,
+    args: &CodexCollectArgs,
+    context: &RuntimeContext,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    let home = resolve_codex_home(args.codex_home.as_ref())?;
+    let start = parse_date_option(args.start.as_deref())?
+        .map(utc_midnight)
+        .transpose()?;
+    let end = parse_date_option(args.end.as_deref())?
+        .map(utc_midnight)
+        .transpose()?;
+    if start.zip(end).is_some_and(|(start, end)| start >= end) {
+        return Err(CliFailure::new(
+            EXIT_INVALID_INPUT,
+            "invalid_date_range",
+            "collection end must be later than collection start",
+        ));
+    }
+    let collected_at = DateTime::<Utc>::from(std::time::SystemTime::now());
+    // The source parser deserializes only metadata and numeric token counters. Unknown
+    // content fields are skipped and are never retained in memory or normalized records.
+    let batch = codex::collect(&home, start, end, collected_at).map_err(codex_source_failure)?;
+    let observations_read = batch.records.len();
+    let mut storage = open_database(global, context)?;
+    let inserted = storage
+        .insert_usage_records(&batch.records)
+        .map_err(storage_failure)?;
+    let summary = CodexCollectSummary {
+        source: "codex_local",
+        files_scanned: batch.files_scanned,
+        observations_read,
+        records_inserted: inserted.inserted,
+        records_already_present: inserted.already_present,
+    };
+    if global.json {
+        render_json_success("collect", summary, batch.warnings, stdout)
+    } else if global.quiet {
+        Ok(())
+    } else {
+        writeln!(stdout, "Collected local Codex usage: {} file(s), {} observation(s), {} inserted, {} already present.", summary.files_scanned, summary.observations_read, summary.records_inserted, summary.records_already_present).map_err(output_failure)?;
+        for warning in batch.warnings {
+            writeln!(stdout, "Warning: {warning}").map_err(output_failure)?;
+        }
+        Ok(())
+    }
+}
+
+fn resolve_codex_home(explicit: Option<&PathBuf>) -> Result<PathBuf, CliFailure> {
+    if let Some(path) = explicit {
+        return Ok(path.clone());
+    }
+    if let Some(path) = std::env::var_os("CODEX_HOME") {
+        return Ok(PathBuf::from(path));
+    }
+    let home =
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).ok_or_else(|| {
+            CliFailure::new(
+                EXIT_INVALID_INPUT,
+                "codex_home_missing",
+                "could not determine Codex home; pass --codex-home",
+            )
+        })?;
+    Ok(PathBuf::from(home).join(".codex"))
+}
+
+fn codex_source_failure(error: CodexSourceError) -> CliFailure {
+    match error {
+        CodexSourceError::SessionsUnavailable => CliFailure::new(
+            EXIT_INVALID_INPUT,
+            "codex_sessions_unavailable",
+            error.to_string(),
+        ),
+        CodexSourceError::Io(_) => {
+            CliFailure::new(EXIT_FILE_IO, "codex_source_io", error.to_string())
+        }
+        CodexSourceError::Malformed { .. } => CliFailure::new(
+            EXIT_INVALID_INPUT,
+            "codex_rollout_malformed",
+            error.to_string(),
+        ),
+        CodexSourceError::Domain => {
+            CliFailure::new(EXIT_INVALID_INPUT, "codex_usage_invalid", error.to_string())
+        }
     }
 }
 
@@ -1513,18 +1630,36 @@ fn csv_record(record: &UsageRecord) -> CsvRecord {
         ),
         Cost::Unknown => ("unknown", String::new(), String::new(), String::new()),
     };
-    let (source_kind, source_operation, source_format, source_name) = match &record.source {
-        CollectionSource::ProviderApi { operation } => (
-            "provider_api",
-            operation.clone(),
-            String::new(),
-            String::new(),
-        ),
-        CollectionSource::Import {
-            format,
-            source_name,
-        } => ("import", String::new(), format.clone(), source_name.clone()),
-    };
+    let (source_kind, source_operation, source_format, source_name, source_tool, source_id) =
+        match &record.source {
+            CollectionSource::ProviderApi { operation } => (
+                "provider_api",
+                operation.clone(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
+            CollectionSource::LocalTool { tool, source_id } => (
+                "local_tool",
+                String::new(),
+                String::new(),
+                String::new(),
+                tool.clone(),
+                source_id.clone(),
+            ),
+            CollectionSource::Import {
+                format,
+                source_name,
+            } => (
+                "import",
+                String::new(),
+                format.clone(),
+                source_name.clone(),
+                String::new(),
+                String::new(),
+            ),
+        };
 
     CsvRecord {
         schema_version: record.schema_version,
@@ -1549,6 +1684,8 @@ fn csv_record(record: &UsageRecord) -> CsvRecord {
         source_operation,
         source_format,
         source_name,
+        source_tool,
+        source_id,
         input_tokens: quantity_total(record, UsageKind::InputTokens),
         output_tokens: quantity_total(record, UsageKind::OutputTokens),
         cached_tokens: quantity_total(record, UsageKind::CachedTokens),

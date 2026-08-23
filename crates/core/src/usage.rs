@@ -226,6 +226,7 @@ impl Cost {
 #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum CollectionSource {
     ProviderApi { operation: String },
+    LocalTool { tool: String, source_id: String },
     Import { format: String, source_name: String },
 }
 
@@ -427,5 +428,20 @@ mod tests {
 
         assert_eq!(record.provider.as_str(), "openai");
         assert_eq!(record.cost.evidence(), CostEvidence::Reported);
+    }
+
+    #[test]
+    fn round_trips_a_local_tool_source_without_content() {
+        let mut record = example_record();
+        record.source = CollectionSource::LocalTool {
+            tool: "codex".into(),
+            source_id: "session-123:event-456".into(),
+        };
+
+        let json = serde_json::to_string(&record).unwrap();
+        let decoded: UsageRecord = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, record);
+        assert!(!json.contains("prompt"));
     }
 }

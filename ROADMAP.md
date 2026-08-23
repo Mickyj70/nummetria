@@ -13,7 +13,7 @@ a focused pull request with tests and documentation.
 - [x] JSON import plus JSON and CSV export.
 - [x] Cross-platform configuration and native credential storage.
 - [x] OpenAI provider adapter.
-- [ ] Anthropic provider adapter.
+- [x] Anthropic provider adapter.
 - [ ] Privacy-reviewed local Codex and Claude Code sources.
 - [ ] Usage reports and local budgets.
 - [ ] Manual subscription renewal tracking.

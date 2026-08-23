@@ -33,6 +33,11 @@ not require network access.
 Nummetria itself sends no analytics or telemetry. Provider requests are still
 subject to the provider's own privacy policy and account configuration.
 
+Opt-in local sources scan only documented tool files. The Codex source uses
+typed streaming extraction for token metadata and never returns, stores, logs,
+or exports prompts, responses, reasoning, tool activity, shell output,
+credentials, or working-directory paths. Unsupported formats fail closed.
+
 ## User control
 
 Users can inspect the configuration and database locations, export normalized

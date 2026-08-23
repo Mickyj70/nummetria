@@ -81,3 +81,6 @@ checkpoint contract is defined in [OpenAI provider](providers/openai.md).
 
 The matching organization-level contract for Anthropic usage and costs is
 defined in [Anthropic provider](providers/anthropic.md).
+
+The version-detected, metadata-only contract for local Codex usage is defined
+in [Local Codex source](sources/codex.md).

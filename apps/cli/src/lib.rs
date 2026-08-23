@@ -495,6 +495,8 @@ struct CsvRecord {
     source_operation: String,
     source_format: String,
     source_name: String,
+    source_tool: String,
+    source_id: String,
     input_tokens: String,
     output_tokens: String,
     cached_tokens: String,
@@ -1513,18 +1515,36 @@ fn csv_record(record: &UsageRecord) -> CsvRecord {
         ),
         Cost::Unknown => ("unknown", String::new(), String::new(), String::new()),
     };
-    let (source_kind, source_operation, source_format, source_name) = match &record.source {
-        CollectionSource::ProviderApi { operation } => (
-            "provider_api",
-            operation.clone(),
-            String::new(),
-            String::new(),
-        ),
-        CollectionSource::Import {
-            format,
-            source_name,
-        } => ("import", String::new(), format.clone(), source_name.clone()),
-    };
+    let (source_kind, source_operation, source_format, source_name, source_tool, source_id) =
+        match &record.source {
+            CollectionSource::ProviderApi { operation } => (
+                "provider_api",
+                operation.clone(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
+            CollectionSource::LocalTool { tool, source_id } => (
+                "local_tool",
+                String::new(),
+                String::new(),
+                String::new(),
+                tool.clone(),
+                source_id.clone(),
+            ),
+            CollectionSource::Import {
+                format,
+                source_name,
+            } => (
+                "import",
+                String::new(),
+                format.clone(),
+                source_name.clone(),
+                String::new(),
+                String::new(),
+            ),
+        };
 
     CsvRecord {
         schema_version: record.schema_version,
@@ -1549,6 +1569,8 @@ fn csv_record(record: &UsageRecord) -> CsvRecord {
         source_operation,
         source_format,
         source_name,
+        source_tool,
+        source_id,
         input_tokens: quantity_total(record, UsageKind::InputTokens),
         output_tokens: quantity_total(record, UsageKind::OutputTokens),
         cached_tokens: quantity_total(record, UsageKind::CachedTokens),

@@ -971,6 +971,7 @@ dependencies = [
  "nummetria-core",
  "nummetria-platform",
  "nummetria-providers",
+ "nummetria-sources",
  "nummetria-storage",
  "rpassword",
  "rust_decimal",
@@ -1016,6 +1017,19 @@ dependencies = [
  "rust_decimal",
  "serde",
  "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "nummetria-sources"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "nummetria-core",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
 ]
 

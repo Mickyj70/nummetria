@@ -267,6 +267,40 @@ pub struct CodexCollectArgs {
     pub end: Option<String>,
 }
 
+#[derive(Debug, clap::Args)]
+pub struct SourcesArgs {
+    #[command(subcommand)]
+    pub command: SourcesCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SourcesCommand {
+    #[command(name = "codex")]
+    /// Inspect the local Codex usage source.
+    Codex(CodexSourceArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct CodexSourceArgs {
+    #[command(subcommand)]
+    pub command: CodexSourceCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CodexSourceCommand {
+    /// Detect whether a compatible local Codex source exists.
+    Detect(CodexInspectArgs),
+    /// Show compatibility and numeric usage-event counts.
+    Status(CodexInspectArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct CodexInspectArgs {
+    /// Override the Codex home directory (otherwise CODEX_HOME or ~/.codex).
+    #[arg(long, value_name = "PATH")]
+    pub codex_home: Option<PathBuf>,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum DataCommand {
     /// Print the resolved SQLite database path.
@@ -301,6 +335,8 @@ pub enum Command {
     Usage,
     /// Manage and test provider connections.
     Providers(ProvidersArgs),
+    /// Discover and inspect opt-in local usage sources.
+    Sources(SourcesArgs),
     /// Create and check local budgets.
     Budget,
     /// Validate and store an exchange file.
@@ -451,6 +487,17 @@ struct CodexCollectSummary {
     observations_read: usize,
     records_inserted: usize,
     records_already_present: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct CodexSourceSummary {
+    source: &'static str,
+    status: nummetria_sources::codex::CodexSupportStatus,
+    discovery: &'static str,
+    codex_home: String,
+    rollout_files: usize,
+    supported_rollout_files: usize,
+    usage_events: usize,
 }
 
 struct RuntimeContext {
@@ -637,6 +684,7 @@ fn run_with_io(
         Command::Config(args) => run_config(&cli.global, args, context, stdout),
         Command::Data(args) => run_data(&cli.global, args, context, stdin, stdout),
         Command::Providers(args) => run_providers(&cli.global, args, secrets, stdin, stdout),
+        Command::Sources(args) => run_sources(&cli.global, args, stdout),
         Command::Collect(args) => run_collect(
             &cli.global,
             args,
@@ -1060,7 +1108,7 @@ fn run_collect_codex(
     context: &RuntimeContext,
     stdout: &mut dyn Write,
 ) -> Result<(), CliFailure> {
-    let home = resolve_codex_home(args.codex_home.as_ref())?;
+    let (home, _) = resolve_codex_home(args.codex_home.as_ref())?;
     let start = parse_date_option(args.start.as_deref())?
         .map(utc_midnight)
         .transpose()?;
@@ -1103,12 +1151,12 @@ fn run_collect_codex(
     }
 }
 
-fn resolve_codex_home(explicit: Option<&PathBuf>) -> Result<PathBuf, CliFailure> {
+fn resolve_codex_home(explicit: Option<&PathBuf>) -> Result<(PathBuf, &'static str), CliFailure> {
     if let Some(path) = explicit {
-        return Ok(path.clone());
+        return Ok((path.clone(), "command"));
     }
     if let Some(path) = std::env::var_os("CODEX_HOME") {
-        return Ok(PathBuf::from(path));
+        return Ok((PathBuf::from(path), "environment"));
     }
     let home =
         std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).ok_or_else(|| {
@@ -1118,7 +1166,71 @@ fn resolve_codex_home(explicit: Option<&PathBuf>) -> Result<PathBuf, CliFailure>
                 "could not determine Codex home; pass --codex-home",
             )
         })?;
-    Ok(PathBuf::from(home).join(".codex"))
+    Ok((PathBuf::from(home).join(".codex"), "default"))
+}
+
+fn run_sources(
+    global: &GlobalOptions,
+    args: &SourcesArgs,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    match &args.command {
+        SourcesCommand::Codex(args) => match &args.command {
+            CodexSourceCommand::Detect(args) => run_codex_inspection(global, args, false, stdout),
+            CodexSourceCommand::Status(args) => run_codex_inspection(global, args, true, stdout),
+        },
+    }
+}
+
+fn run_codex_inspection(
+    global: &GlobalOptions,
+    args: &CodexInspectArgs,
+    detailed: bool,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    let (home, discovery) = resolve_codex_home(args.codex_home.as_ref())?;
+    let inspection = codex::inspect(&home).map_err(codex_source_failure)?;
+    let summary = CodexSourceSummary {
+        source: "codex_local",
+        status: inspection.status,
+        discovery,
+        codex_home: home.display().to_string(),
+        rollout_files: inspection.rollout_files,
+        supported_rollout_files: inspection.supported_rollout_files,
+        usage_events: inspection.usage_events,
+    };
+    if global.json {
+        render_json_success("sources", summary, inspection.warnings, stdout)
+    } else if global.quiet {
+        Ok(())
+    } else if detailed {
+        writeln!(stdout, "Codex source: {}", summary.status.as_str()).map_err(output_failure)?;
+        writeln!(
+            stdout,
+            "Home: {} ({})",
+            summary.codex_home, summary.discovery
+        )
+        .map_err(output_failure)?;
+        writeln!(
+            stdout,
+            "Rollouts: {} total, {} supported",
+            summary.rollout_files, summary.supported_rollout_files
+        )
+        .map_err(output_failure)?;
+        writeln!(stdout, "Usage events: {}", summary.usage_events).map_err(output_failure)?;
+        for warning in inspection.warnings {
+            writeln!(stdout, "Warning: {warning}").map_err(output_failure)?;
+        }
+        Ok(())
+    } else {
+        writeln!(
+            stdout,
+            "Codex source: {} at {}",
+            summary.status.as_str(),
+            summary.codex_home
+        )
+        .map_err(output_failure)
+    }
 }
 
 fn codex_source_failure(error: CodexSourceError) -> CliFailure {
@@ -2133,6 +2245,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Collect(_) => "collect",
         Command::Usage => "usage",
         Command::Providers(_) => "providers",
+        Command::Sources(_) => "sources",
         Command::Budget => "budget",
         Command::Import(_) => "import",
         Command::Export(_) => "export",
@@ -2155,6 +2268,7 @@ fn command_uses_configuration(command: &Command) -> bool {
         Command::Import(args) => !args.dry_run,
         Command::Setup
         | Command::Providers(_)
+        | Command::Sources(_)
         | Command::Budget
         | Command::Doctor
         | Command::Completion
@@ -2370,6 +2484,8 @@ mod tests {
             &["nummetria", "usage"],
             &["nummetria", "providers", "openai", "status"],
             &["nummetria", "providers", "anthropic", "status"],
+            &["nummetria", "sources", "codex", "detect"],
+            &["nummetria", "sources", "codex", "status"],
             &["nummetria", "budget"],
             &["nummetria", "import", "usage.json"],
             &["nummetria", "export", "--format", "json"],

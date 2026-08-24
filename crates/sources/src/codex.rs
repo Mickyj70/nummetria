@@ -11,6 +11,7 @@ use nummetria_core::{
 };
 use rust_decimal::Decimal;
 use serde::Deserialize;
+use serde::Serialize;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -30,6 +31,132 @@ pub struct CodexBatch {
     pub records: Vec<UsageRecord>,
     pub files_scanned: usize,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexSupportStatus {
+    NotFound,
+    Empty,
+    Unsupported,
+    Supported,
+}
+
+impl CodexSupportStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::Empty => "empty",
+            Self::Unsupported => "unsupported",
+            Self::Supported => "supported",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct CodexInspection {
+    pub status: CodexSupportStatus,
+    pub rollout_files: usize,
+    pub supported_rollout_files: usize,
+    pub usage_events: usize,
+    pub warnings: Vec<String>,
+}
+
+/// Inspects rollout compatibility without returning or storing usage records.
+pub fn inspect(codex_home: &Path) -> Result<CodexInspection, CodexSourceError> {
+    let sessions = codex_home.join("sessions");
+    if !sessions.is_dir() {
+        return Ok(CodexInspection {
+            status: CodexSupportStatus::NotFound,
+            rollout_files: 0,
+            supported_rollout_files: 0,
+            usage_events: 0,
+            warnings: Vec::new(),
+        });
+    }
+    let mut files = Vec::new();
+    find_rollouts(&sessions, &mut files)?;
+    files.sort();
+    if files.is_empty() {
+        return Ok(CodexInspection {
+            status: CodexSupportStatus::Empty,
+            rollout_files: 0,
+            supported_rollout_files: 0,
+            usage_events: 0,
+            warnings: Vec::new(),
+        });
+    }
+    let mut supported_rollout_files = 0;
+    let mut usage_events = 0;
+    let mut warnings = Vec::new();
+    for path in &files {
+        let relative = path
+            .strip_prefix(&sessions)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned();
+        let (supported, events) = inspect_rollout(path, &relative, &mut warnings)?;
+        supported_rollout_files += usize::from(supported);
+        usage_events += events;
+    }
+    Ok(CodexInspection {
+        status: if usage_events > 0 {
+            CodexSupportStatus::Supported
+        } else {
+            CodexSupportStatus::Unsupported
+        },
+        rollout_files: files.len(),
+        supported_rollout_files,
+        usage_events,
+        warnings,
+    })
+}
+
+fn inspect_rollout(
+    path: &Path,
+    relative: &str,
+    warnings: &mut Vec<String>,
+) -> Result<(bool, usize), CodexSourceError> {
+    let mut reader = BufReader::new(File::open(path).map_err(CodexSourceError::Io)?);
+    let mut line = String::new();
+    let mut line_number = 0;
+    let mut has_session = false;
+    let mut usage_events = 0;
+    loop {
+        line.clear();
+        let bytes = reader.read_line(&mut line).map_err(CodexSourceError::Io)?;
+        if bytes == 0 {
+            break;
+        }
+        line_number += 1;
+        let complete = line.ends_with('\n');
+        let parsed: RolloutLine = match serde_json::from_str(&line) {
+            Ok(value) => value,
+            Err(_) if !complete => {
+                warnings.push(format!("ignored incomplete final line in {relative}"));
+                break;
+            }
+            Err(_) => {
+                return Err(CodexSourceError::Malformed {
+                    file: relative.to_owned(),
+                    line: line_number,
+                });
+            }
+        };
+        if parsed.kind == "session_meta" && parsed.payload.id.is_some() {
+            has_session = true;
+        } else if parsed.kind == "event_msg"
+            && parsed.payload.kind.as_deref() == Some("token_count")
+            && parsed
+                .payload
+                .info
+                .and_then(|info| info.last_token_usage)
+                .is_some_and(|usage| !usage.is_empty())
+        {
+            usage_events += 1;
+        }
+    }
+    Ok((has_session && usage_events > 0, usage_events))
 }
 
 #[derive(Debug, Deserialize)]
@@ -280,6 +407,12 @@ mod tests {
         let rendered = format!("{batch:?}");
         assert!(!rendered.contains("SECRET_CANARY"));
         assert!(matches!(batch.records[0].cost, Cost::Unknown));
+        let inspection = inspect(home.path()).unwrap();
+        assert_eq!(inspection.status, CodexSupportStatus::Supported);
+        assert_eq!(inspection.rollout_files, 1);
+        assert_eq!(inspection.supported_rollout_files, 1);
+        assert_eq!(inspection.usage_events, 1);
+        assert!(!format!("{inspection:?}").contains("SECRET_CANARY"));
     }
 
     #[test]
@@ -293,5 +426,31 @@ mod tests {
         let batch = collect(home.path(), None, None, now).unwrap();
         assert_eq!(batch.warnings.len(), 1);
         assert!(!batch.warnings[0].contains("SECRET_CANARY"));
+    }
+
+    #[test]
+    fn inspection_distinguishes_missing_empty_and_unsupported_sources() {
+        let missing = tempdir().unwrap();
+        assert_eq!(
+            inspect(missing.path()).unwrap().status,
+            CodexSupportStatus::NotFound
+        );
+
+        let empty = tempdir().unwrap();
+        fs::create_dir(empty.path().join("sessions")).unwrap();
+        assert_eq!(
+            inspect(empty.path()).unwrap().status,
+            CodexSupportStatus::Empty
+        );
+
+        let unsupported = tempdir().unwrap();
+        let sessions = unsupported.path().join("sessions");
+        fs::create_dir(&sessions).unwrap();
+        let mut file = File::create(sessions.join("rollout-test.jsonl")).unwrap();
+        writeln!(file, r#"{{"timestamp":"2026-08-23T10:00:00Z","type":"session_meta","payload":{{"id":"session-1"}}}}"#).unwrap();
+        assert_eq!(
+            inspect(unsupported.path()).unwrap().status,
+            CodexSupportStatus::Unsupported
+        );
     }
 }

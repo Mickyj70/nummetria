@@ -292,6 +292,23 @@ impl UsageRecord {
             collected_at,
         })
     }
+
+    /// Returns true when two records describe the same source observation.
+    ///
+    /// `collected_at` is deliberately excluded: re-reading an immutable source
+    /// at a later time must remain idempotent, while changes to usage, cost, or
+    /// source metadata remain genuine identity conflicts.
+    pub fn same_observation_as(&self, other: &Self) -> bool {
+        self.schema_version == other.schema_version
+            && self.id == other.id
+            && self.provider == other.provider
+            && self.model == other.model
+            && self.project == other.project
+            && self.time_range == other.time_range
+            && self.quantities == other.quantities
+            && self.cost == other.cost
+            && self.source == other.source
+    }
 }
 
 impl TryFrom<RawUsageRecord> for UsageRecord {
@@ -443,5 +460,16 @@ mod tests {
 
         assert_eq!(decoded, record);
         assert!(!json.contains("prompt"));
+    }
+
+    #[test]
+    fn observation_equality_ignores_collection_time_only() {
+        let first = example_record();
+        let mut recollected = first.clone();
+        recollected.collected_at += chrono::Duration::hours(1);
+        assert!(first.same_observation_as(&recollected));
+
+        recollected.quantities[0].amount += Decimal::ONE;
+        assert!(!first.same_observation_as(&recollected));
     }
 }

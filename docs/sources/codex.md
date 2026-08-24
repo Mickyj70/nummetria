@@ -25,6 +25,7 @@ nummetria sources codex status [--codex-home <PATH>]
 nummetria collect codex [--codex-home <PATH>]
                          [--start <YYYY-MM-DD>]
                          [--end <YYYY-MM-DD>]
+nummetria doctor
 ```
 
 An explicit `--codex-home` wins. Otherwise Nummetria checks `CODEX_HOME`, then
@@ -105,6 +106,11 @@ file.
 
 A new Codex layout requires a sanitized fixture, documentation update, and
 privacy review. Detection fails closed when required metadata changes.
+
+`doctor` performs the same read-only compatibility inspection using normal
+Codex-home discovery. Human and JSON output include only discovery status and
+numeric counters. A supported source does not imply that subscription quota or
+cost information is available.
 
 ## Official references
 

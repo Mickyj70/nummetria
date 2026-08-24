@@ -67,6 +67,9 @@ cargo run --bin nummetria -- --help
 cargo run --bin nummetria -- setup
 cargo run --bin nummetria -- import fixtures/exchange/valid-v1.json --dry-run
 cargo run --bin nummetria -- config show
+cargo run --bin nummetria -- sources codex status
+cargo run --bin nummetria -- collect codex
+cargo run --bin nummetria -- doctor
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
@@ -74,6 +77,7 @@ cargo test --workspace
 
 All public v0.1 command names appear in help. Setup, configuration inspection,
 local data operations, OpenAI and Anthropic credential and collection commands,
+privacy-reviewed incremental local Codex collection and diagnostics,
 import, status, usage, export, and version now work; the remaining commands
 intentionally stay unavailable until their focused feature branches land. Data
 commands discover an operating-system-standard database by default.

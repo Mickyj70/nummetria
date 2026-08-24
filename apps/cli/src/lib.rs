@@ -2,11 +2,11 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc};
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use nummetria_core::{
-    CollectionSource, Cost, CostEvidence, ExchangeError, RecordValidationError, UsageExchange,
-    UsageKind, UsageRecord,
+    CollectionSource, Cost, CostEvidence, ExchangeError, GroupDimension, RecordValidationError,
+    ReportGroup, UsageExchange, UsageKind, UsageRecord, aggregate_records,
 };
 use nummetria_platform::{
     ConfigError, ConfigSource, CredentialId, EnvironmentOverrides, KeyringSecretStore,
@@ -268,6 +268,47 @@ pub struct CodexCollectArgs {
 }
 
 #[derive(Debug, clap::Args)]
+pub struct UsageArgs {
+    #[command(subcommand)]
+    pub command: Option<UsageCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum UsageCommand {
+    /// Aggregate usage and costs over a UTC range.
+    Report(UsageReportArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ReportPeriod {
+    Today,
+    Week,
+    Month,
+    All,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ReportGroupBy {
+    None,
+    Provider,
+    Model,
+    Project,
+    Source,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct UsageReportArgs {
+    #[arg(long, value_enum, conflicts_with_all = ["start", "end"])]
+    pub period: Option<ReportPeriod>,
+    #[arg(long, value_name = "YYYY-MM-DD", requires = "end")]
+    pub start: Option<String>,
+    #[arg(long, value_name = "YYYY-MM-DD", requires = "start")]
+    pub end: Option<String>,
+    #[arg(long, value_enum, default_value = "none")]
+    pub group_by: ReportGroupBy,
+}
+
+#[derive(Debug, clap::Args)]
 pub struct SourcesArgs {
     #[command(subcommand)]
     pub command: SourcesCommand,
@@ -332,7 +373,7 @@ pub enum Command {
     /// Collect new usage from configured providers.
     Collect(CollectArgs),
     /// Query and group stored usage.
-    Usage,
+    Usage(UsageArgs),
     /// Manage and test provider connections.
     Providers(ProvidersArgs),
     /// Discover and inspect opt-in local usage sources.
@@ -507,6 +548,21 @@ struct CodexSourceSummary {
 #[derive(Debug, Serialize)]
 struct DoctorSummary {
     codex: CodexSourceSummary,
+}
+
+#[derive(Debug, Serialize)]
+struct UsageReportSummary {
+    period: &'static str,
+    start: Option<String>,
+    end: Option<String>,
+    group_by: &'static str,
+    groups: Vec<ReportGroup>,
+}
+
+struct ReportRange {
+    name: &'static str,
+    start: Option<DateTime<Utc>>,
+    end: Option<DateTime<Utc>>,
 }
 
 struct RuntimeContext {
@@ -705,7 +761,7 @@ fn run_with_io(
         ),
         Command::Import(args) => run_import(&cli.global, args, context, stdout, stderr),
         Command::Status => run_status(&cli.global, context, stdout),
-        Command::Usage => run_usage(&cli.global, context, stdout),
+        Command::Usage(args) => run_usage(&cli.global, args, context, stdout),
         Command::Export(args) => run_export(&cli.global, args, context, stdout),
         Command::Doctor => run_doctor(&cli.global, stdout),
         _ => Err(CliFailure::new(
@@ -2006,6 +2062,18 @@ fn run_status(
 
 fn run_usage(
     global: &GlobalOptions,
+    args: &UsageArgs,
+    context: &RuntimeContext,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    match &args.command {
+        None => run_usage_list(global, context, stdout),
+        Some(UsageCommand::Report(args)) => run_usage_report(global, args, context, stdout),
+    }
+}
+
+fn run_usage_list(
+    global: &GlobalOptions,
     context: &RuntimeContext,
     stdout: &mut dyn Write,
 ) -> Result<(), CliFailure> {
@@ -2047,6 +2115,152 @@ fn run_usage(
         }
         Ok(())
     }
+}
+
+fn run_usage_report(
+    global: &GlobalOptions,
+    args: &UsageReportArgs,
+    context: &RuntimeContext,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    let range = report_range(args)?;
+    let storage = open_database(global, context)?;
+    let records = storage
+        .query_usage(&UsageQuery {
+            start: range.start,
+            end: range.end,
+            ..UsageQuery::default()
+        })
+        .map_err(storage_failure)?;
+    let dimension = match args.group_by {
+        ReportGroupBy::None => GroupDimension::None,
+        ReportGroupBy::Provider => GroupDimension::Provider,
+        ReportGroupBy::Model => GroupDimension::Model,
+        ReportGroupBy::Project => GroupDimension::Project,
+        ReportGroupBy::Source => GroupDimension::Source,
+    };
+    let summary = UsageReportSummary {
+        period: range.name,
+        start: range.start.map(|value| value.to_rfc3339()),
+        end: range.end.map(|value| value.to_rfc3339()),
+        group_by: match args.group_by {
+            ReportGroupBy::None => "none",
+            ReportGroupBy::Provider => "provider",
+            ReportGroupBy::Model => "model",
+            ReportGroupBy::Project => "project",
+            ReportGroupBy::Source => "source",
+        },
+        groups: aggregate_records(&records, dimension),
+    };
+    if global.json {
+        render_json_success("usage", summary, Vec::new(), stdout)
+    } else if summary.groups.is_empty() {
+        writeln!(stdout, "No usage records found for this UTC range.").map_err(output_failure)
+    } else {
+        writeln!(
+            stdout,
+            "Usage report: {} (grouped by {})",
+            summary.period, summary.group_by
+        )
+        .map_err(output_failure)?;
+        if let (Some(start), Some(end)) = (&summary.start, &summary.end) {
+            writeln!(stdout, "Range: {start}..{end}").map_err(output_failure)?;
+        }
+        for group in &summary.groups {
+            writeln!(stdout, "{}: {} record(s)", group.key, group.record_count)
+                .map_err(output_failure)?;
+            for quantity in &group.quantities {
+                writeln!(
+                    stdout,
+                    "  {}: {}",
+                    usage_kind_name(quantity.kind),
+                    quantity.amount
+                )
+                .map_err(output_failure)?;
+            }
+            for cost in &group.costs {
+                writeln!(
+                    stdout,
+                    "  {} {}: {}",
+                    cost_evidence_name(&cost.evidence),
+                    cost.currency.as_str(),
+                    cost.amount
+                )
+                .map_err(output_failure)?;
+            }
+            writeln!(
+                stdout,
+                "  unknown-cost records: {}",
+                group.unknown_cost_record_count
+            )
+            .map_err(output_failure)?;
+        }
+        Ok(())
+    }
+}
+
+fn report_range(args: &UsageReportArgs) -> Result<ReportRange, CliFailure> {
+    if let (Some(start), Some(end)) = (args.start.as_deref(), args.end.as_deref()) {
+        let start = utc_midnight(NaiveDate::parse_from_str(start, "%Y-%m-%d").map_err(|_| {
+            CliFailure::new(
+                EXIT_INVALID_INPUT,
+                "invalid_date",
+                "invalid --start; expected YYYY-MM-DD",
+            )
+        })?)?;
+        let end = utc_midnight(NaiveDate::parse_from_str(end, "%Y-%m-%d").map_err(|_| {
+            CliFailure::new(
+                EXIT_INVALID_INPUT,
+                "invalid_date",
+                "invalid --end; expected YYYY-MM-DD",
+            )
+        })?)?;
+        if start >= end {
+            return Err(CliFailure::new(
+                EXIT_INVALID_INPUT,
+                "invalid_date_range",
+                "report end must be later than report start",
+            ));
+        }
+        return Ok(ReportRange {
+            name: "custom",
+            start: Some(start),
+            end: Some(end),
+        });
+    }
+    let period = args.period.unwrap_or(ReportPeriod::Month);
+    if matches!(period, ReportPeriod::All) {
+        return Ok(ReportRange {
+            name: "all",
+            start: None,
+            end: None,
+        });
+    }
+    let today = DateTime::<Utc>::from(std::time::SystemTime::now()).date_naive();
+    let (name, start_date, end_date) = match period {
+        ReportPeriod::Today => ("today", today, today + Duration::days(1)),
+        ReportPeriod::Week => {
+            let start = today - Duration::days(i64::from(today.weekday().num_days_from_monday()));
+            ("week", start, start + Duration::days(7))
+        }
+        ReportPeriod::Month => {
+            let start =
+                NaiveDate::from_ymd_opt(today.year(), today.month(), 1).expect("valid month");
+            let end = if today.month() == 12 {
+                NaiveDate::from_ymd_opt(today.year() + 1, 1, 1)
+            } else {
+                NaiveDate::from_ymd_opt(today.year(), today.month() + 1, 1)
+            }
+            .expect("valid next month");
+            ("month", start, end)
+        }
+        ReportPeriod::All => unreachable!(),
+    };
+    Ok(ReportRange {
+        name,
+        start: Some(utc_midnight(start_date)?),
+        end: Some(utc_midnight(end_date)?),
+    })
 }
 
 fn open_database(
@@ -2340,7 +2554,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Setup => "setup",
         Command::Status => "status",
         Command::Collect(_) => "collect",
-        Command::Usage => "usage",
+        Command::Usage(_) => "usage",
         Command::Providers(_) => "providers",
         Command::Sources(_) => "sources",
         Command::Budget => "budget",
@@ -2357,7 +2571,7 @@ fn command_name(command: &Command) -> &'static str {
 fn command_uses_configuration(command: &Command) -> bool {
     match command {
         Command::Status
-        | Command::Usage
+        | Command::Usage(_)
         | Command::Export(_)
         | Command::Config(_)
         | Command::Data(_)
@@ -2579,6 +2793,7 @@ mod tests {
             &["nummetria", "collect", "openai"],
             &["nummetria", "collect", "anthropic"],
             &["nummetria", "usage"],
+            &["nummetria", "usage", "report"],
             &["nummetria", "providers", "openai", "status"],
             &["nummetria", "providers", "anthropic", "status"],
             &["nummetria", "sources", "codex", "detect"],
@@ -3222,6 +3437,28 @@ mod tests {
             usage["data"]["records"][0]["id"],
             "openai:usage:2026-08-17:project-a"
         );
+
+        let (report_success, report, report_error) = run(&[
+            "nummetria",
+            "--database",
+            database,
+            "--json",
+            "usage",
+            "report",
+            "--period",
+            "all",
+            "--group-by",
+            "provider",
+        ]);
+        assert!(report_success, "{report_error}");
+        let report: serde_json::Value = serde_json::from_str(&report).unwrap();
+        assert_eq!(report["data"]["period"], "all");
+        assert_eq!(report["data"]["groups"][0]["key"], "openai");
+        assert_eq!(
+            report["data"]["groups"][0]["quantities"][0]["amount"],
+            "1250"
+        );
+        assert_eq!(report["data"]["groups"][0]["costs"][0]["amount"], "0.03125");
     }
 
     #[test]

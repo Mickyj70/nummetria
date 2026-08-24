@@ -51,8 +51,9 @@ nummetria export --format <json|csv> --output <PATH>
 ```
 
 `status` prints all-time quantities and costs grouped by evidence and currency.
-`usage` lists normalized records in period-start and record-ID order. Date
-ranges and custom grouping belong to the later reporting milestone.
+`usage` lists normalized records in period-start and record-ID order. Aggregated
+date ranges and grouping use the compatible `usage report` command documented
+in [Usage reporting and local budgets](reporting-budgets.md).
 
 JSON export writes the same exchange envelope accepted by `import`. CSV uses
 one row per usage record. It includes identity, period, provider, cost, source,

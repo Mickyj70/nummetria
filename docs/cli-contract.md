@@ -84,3 +84,6 @@ defined in [Anthropic provider](providers/anthropic.md).
 
 The version-detected, metadata-only contract for local Codex usage is defined
 in [Local Codex source](sources/codex.md).
+
+UTC reporting, grouping, local budget persistence, and conservative unknown
+cost evaluation are defined in [Usage reporting and local budgets](reporting-budgets.md).

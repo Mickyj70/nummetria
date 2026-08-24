@@ -1,6 +1,7 @@
 use std::{
+    collections::BTreeMap,
     fs::{self, File},
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
@@ -31,6 +32,26 @@ pub struct CodexBatch {
     pub records: Vec<UsageRecord>,
     pub files_scanned: usize,
     pub warnings: Vec<String>,
+    pub checkpoint: Option<String>,
+    pub files_resumed: usize,
+    pub files_reset: usize,
+    pub lines_examined: usize,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodexCursor {
+    version: u16,
+    files: BTreeMap<String, FileCursor>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileCursor {
+    offset: u64,
+    line_number: usize,
+    session_id: String,
+    model: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -202,6 +223,16 @@ pub fn collect(
     end: Option<DateTime<Utc>>,
     collected_at: DateTime<Utc>,
 ) -> Result<CodexBatch, CodexSourceError> {
+    collect_incremental(codex_home, start, end, collected_at, None)
+}
+
+pub fn collect_incremental(
+    codex_home: &Path,
+    start: Option<DateTime<Utc>>,
+    end: Option<DateTime<Utc>>,
+    collected_at: DateTime<Utc>,
+    checkpoint: Option<&str>,
+) -> Result<CodexBatch, CodexSourceError> {
     let sessions = codex_home.join("sessions");
     if !sessions.is_dir() {
         return Err(CodexSourceError::SessionsUnavailable);
@@ -211,8 +242,43 @@ pub fn collect(
     files.sort();
     let mut records = Vec::new();
     let mut warnings = Vec::new();
+    let incremental = start.is_none() && end.is_none();
+    let previous = if incremental {
+        checkpoint
+            .and_then(|value| match serde_json::from_str::<CodexCursor>(value) {
+                Ok(cursor) if cursor.version == 1 => Some(cursor),
+                _ => {
+                    warnings.push(
+                        "ignored an invalid Codex checkpoint and performed a full rescan".into(),
+                    );
+                    None
+                }
+            })
+            .unwrap_or(CodexCursor {
+                version: 1,
+                files: BTreeMap::new(),
+            })
+    } else {
+        CodexCursor {
+            version: 1,
+            files: BTreeMap::new(),
+        }
+    };
+    let mut next = CodexCursor {
+        version: 1,
+        files: BTreeMap::new(),
+    };
+    let mut files_resumed = 0;
+    let mut files_reset = 0;
+    let mut lines_examined = 0;
     for file in &files {
-        read_rollout(
+        let relative = file
+            .strip_prefix(&sessions)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .into_owned();
+        let prior = incremental.then(|| previous.files.get(&relative)).flatten();
+        let outcome = read_rollout(
             file,
             &sessions,
             start,
@@ -220,7 +286,16 @@ pub fn collect(
             collected_at,
             &mut records,
             &mut warnings,
+            prior,
         )?;
+        files_resumed += usize::from(outcome.resumed);
+        files_reset += usize::from(outcome.reset);
+        lines_examined += outcome.lines_examined;
+        if incremental {
+            if let Some(cursor) = outcome.cursor {
+                next.files.insert(relative, cursor);
+            }
+        }
     }
     records.sort_by(|left, right| {
         left.time_range
@@ -232,6 +307,11 @@ pub fn collect(
         records,
         files_scanned: files.len(),
         warnings,
+        checkpoint: incremental
+            .then(|| serde_json::to_string(&next).expect("cursor is serializable")),
+        files_resumed,
+        files_reset,
+        lines_examined,
     })
 }
 
@@ -263,29 +343,54 @@ fn read_rollout(
     collected_at: DateTime<Utc>,
     records: &mut Vec<UsageRecord>,
     warnings: &mut Vec<String>,
-) -> Result<(), CodexSourceError> {
+    previous: Option<&FileCursor>,
+) -> Result<ReadOutcome, CodexSourceError> {
     let relative = path
         .strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()
         .into_owned();
-    let mut reader = BufReader::new(File::open(path).map_err(CodexSourceError::Io)?);
+    let file = File::open(path).map_err(CodexSourceError::Io)?;
+    let length = file.metadata().map_err(CodexSourceError::Io)?.len();
+    let header_session = read_header_session(path)?;
+    let can_resume = previous.is_some_and(|cursor| {
+        cursor.offset <= length && Some(cursor.session_id.as_str()) == header_session.as_deref()
+    });
+    let reset = previous.is_some() && !can_resume;
+    let mut reader = BufReader::new(file);
     let mut line = String::new();
-    let mut line_number = 0;
-    let mut session_id = None;
-    let mut model = None;
+    let mut line_number = previous
+        .filter(|_| can_resume)
+        .map_or(0, |cursor| cursor.line_number);
+    let mut session_id = previous
+        .filter(|_| can_resume)
+        .map(|cursor| cursor.session_id.clone());
+    let mut model = previous
+        .filter(|_| can_resume)
+        .and_then(|cursor| cursor.model.clone());
+    let mut offset = 0;
+    if let Some(cursor) = previous.filter(|_| can_resume) {
+        reader
+            .seek(SeekFrom::Start(cursor.offset))
+            .map_err(CodexSourceError::Io)?;
+        offset = cursor.offset;
+    }
+    let mut lines_examined = 0;
     loop {
         line.clear();
+        let line_start = reader.stream_position().map_err(CodexSourceError::Io)?;
         let bytes = reader.read_line(&mut line).map_err(CodexSourceError::Io)?;
         if bytes == 0 {
             break;
         }
         line_number += 1;
+        lines_examined += 1;
         let complete = line.ends_with('\n');
         let parsed: RolloutLine = match serde_json::from_str(&line) {
             Ok(value) => value,
             Err(_) if !complete => {
                 warnings.push(format!("ignored incomplete final line in {relative}"));
+                offset = line_start;
                 break;
             }
             Err(_) => {
@@ -295,6 +400,7 @@ fn read_rollout(
                 });
             }
         };
+        offset = reader.stream_position().map_err(CodexSourceError::Io)?;
         if parsed.kind == "session_meta" {
             session_id = parsed.payload.id;
         } else if parsed.kind == "turn_context" {
@@ -324,7 +430,39 @@ fn read_rollout(
             }
         }
     }
-    Ok(())
+    Ok(ReadOutcome {
+        resumed: can_resume,
+        reset,
+        lines_examined,
+        cursor: session_id.map(|session_id| FileCursor {
+            offset,
+            line_number,
+            session_id,
+            model,
+        }),
+    })
+}
+
+struct ReadOutcome {
+    resumed: bool,
+    reset: bool,
+    lines_examined: usize,
+    cursor: Option<FileCursor>,
+}
+
+fn read_header_session(path: &Path) -> Result<Option<String>, CodexSourceError> {
+    let mut reader = BufReader::new(File::open(path).map_err(CodexSourceError::Io)?);
+    let mut line = String::new();
+    if reader.read_line(&mut line).map_err(CodexSourceError::Io)? == 0 {
+        return Ok(None);
+    }
+    let parsed: RolloutLine = match serde_json::from_str(&line) {
+        Ok(parsed) => parsed,
+        Err(_) => return Ok(None),
+    };
+    Ok((parsed.kind == "session_meta")
+        .then_some(parsed.payload.id)
+        .flatten())
 }
 
 impl TokenUsage {
@@ -387,7 +525,7 @@ fn normalize(
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use std::{fs, io::Write};
+    use std::{fs, fs::OpenOptions, io::Write};
     use tempfile::tempdir;
 
     #[test]
@@ -452,5 +590,37 @@ mod tests {
             inspect(unsupported.path()).unwrap().status,
             CodexSupportStatus::Unsupported
         );
+    }
+
+    #[test]
+    fn incremental_collection_reads_only_appended_complete_lines() {
+        let home = tempdir().unwrap();
+        let sessions = home.path().join("sessions");
+        fs::create_dir(&sessions).unwrap();
+        let path = sessions.join("rollout-test.jsonl");
+        let mut file = File::create(&path).unwrap();
+        writeln!(file, r#"{{"timestamp":"2026-08-23T10:00:00Z","type":"session_meta","payload":{{"id":"session-1"}}}}"#).unwrap();
+        writeln!(file, r#"{{"timestamp":"2026-08-23T10:00:01Z","type":"turn_context","payload":{{"model":"gpt-5"}}}}"#).unwrap();
+        writeln!(file, r#"{{"timestamp":"2026-08-23T10:00:02Z","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":10,"output_tokens":3}}}}}}}}"#).unwrap();
+        drop(file);
+        let now = Utc.with_ymd_and_hms(2026, 8, 23, 11, 0, 0).unwrap();
+        let first = collect_incremental(home.path(), None, None, now, None).unwrap();
+        assert_eq!(first.records.len(), 1);
+        assert_eq!(first.lines_examined, 3);
+
+        let second =
+            collect_incremental(home.path(), None, None, now, first.checkpoint.as_deref()).unwrap();
+        assert!(second.records.is_empty());
+        assert_eq!(second.files_resumed, 1);
+        assert_eq!(second.lines_examined, 0);
+
+        let mut file = OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(file, r#"{{"timestamp":"2026-08-23T10:00:03Z","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":4,"output_tokens":2}}}}}}}}"#).unwrap();
+        drop(file);
+        let third = collect_incremental(home.path(), None, None, now, second.checkpoint.as_deref())
+            .unwrap();
+        assert_eq!(third.records.len(), 1);
+        assert_eq!(third.files_resumed, 1);
+        assert_eq!(third.lines_examined, 1);
     }
 }

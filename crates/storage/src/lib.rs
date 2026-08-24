@@ -458,7 +458,8 @@ fn insert_record(
             [record.id.as_str()],
             |row| row.get(0),
         )?;
-        return if existing == payload {
+        let existing: UsageRecord = serde_json::from_str(&existing)?;
+        return if existing.same_observation_as(record) {
             Ok(InsertOutcome::AlreadyPresent)
         } else {
             Err(StorageError::RecordConflict {
@@ -626,6 +627,24 @@ mod tests {
         );
         assert_eq!(storage.row_count("usage_records"), 1);
         assert_eq!(storage.row_count("usage_quantities"), 2);
+    }
+
+    #[test]
+    fn recollecting_the_same_observation_at_a_later_time_is_idempotent() {
+        let mut storage = SqliteStorage::open_in_memory().unwrap();
+        let first = record("same-id", "openai", 17, reported("0.03125"));
+        let mut recollected = first.clone();
+        recollected.collected_at += chrono::Duration::hours(1);
+
+        assert_eq!(
+            storage.insert_usage_record(&first).unwrap(),
+            InsertOutcome::Inserted
+        );
+        assert_eq!(
+            storage.insert_usage_record(&recollected).unwrap(),
+            InsertOutcome::AlreadyPresent
+        );
+        assert_eq!(storage.get_usage_record(&first.id).unwrap(), Some(first));
     }
 
     #[test]

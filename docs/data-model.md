@@ -14,6 +14,8 @@ audit how a number was produced.
 - `CollectionSource`: provider API, imported file, or future supported source.
 - `TimeRange`: a half-open UTC interval with an inclusive start and exclusive
   end.
+- `Budget`: a named local decimal limit, ISO currency, UTC calendar period, and
+  optional usage-dimension filters.
 
 ## Invariants
 
@@ -59,3 +61,7 @@ record is removed.
 Indexes correspond to the current query contract: time overlap plus optional
 provider, model, or project filters. Future indexes must be justified by a real
 query and its `EXPLAIN QUERY PLAN` output rather than added speculatively.
+
+The reporting and budget migration adds named budget definitions without
+embedding aggregate snapshots. Checks always derive current results from usage
+records, so deleting or importing usage is reflected immediately.

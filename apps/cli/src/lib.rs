@@ -504,6 +504,11 @@ struct CodexSourceSummary {
     usage_events: usize,
 }
 
+#[derive(Debug, Serialize)]
+struct DoctorSummary {
+    codex: CodexSourceSummary,
+}
+
 struct RuntimeContext {
     paths: PlatformPaths,
     environment: EnvironmentOverrides,
@@ -702,6 +707,7 @@ fn run_with_io(
         Command::Status => run_status(&cli.global, context, stdout),
         Command::Usage => run_usage(&cli.global, context, stdout),
         Command::Export(args) => run_export(&cli.global, args, context, stdout),
+        Command::Doctor => run_doctor(&cli.global, stdout),
         _ => Err(CliFailure::new(
             EXIT_INVALID_INPUT,
             "not_implemented",
@@ -1195,21 +1201,71 @@ fn run_collect_codex(
 }
 
 fn resolve_codex_home(explicit: Option<&PathBuf>) -> Result<(PathBuf, &'static str), CliFailure> {
+    let platform_home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
+    resolve_codex_home_values(explicit, std::env::var_os("CODEX_HOME"), platform_home)
+}
+
+fn resolve_codex_home_values(
+    explicit: Option<&PathBuf>,
+    codex_home: Option<std::ffi::OsString>,
+    platform_home: Option<std::ffi::OsString>,
+) -> Result<(PathBuf, &'static str), CliFailure> {
     if let Some(path) = explicit {
         return Ok((path.clone(), "command"));
     }
-    if let Some(path) = std::env::var_os("CODEX_HOME") {
+    if let Some(path) = codex_home {
         return Ok((PathBuf::from(path), "environment"));
     }
-    let home =
-        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).ok_or_else(|| {
-            CliFailure::new(
-                EXIT_INVALID_INPUT,
-                "codex_home_missing",
-                "could not determine Codex home; pass --codex-home",
-            )
-        })?;
+    let home = platform_home.ok_or_else(|| {
+        CliFailure::new(
+            EXIT_INVALID_INPUT,
+            "codex_home_missing",
+            "could not determine Codex home; pass --codex-home",
+        )
+    })?;
     Ok((PathBuf::from(home).join(".codex"), "default"))
+}
+
+fn run_doctor(global: &GlobalOptions, stdout: &mut dyn Write) -> Result<(), CliFailure> {
+    let (home, discovery) = resolve_codex_home(None)?;
+    let inspection = codex::inspect(&home).map_err(codex_source_failure)?;
+    let summary = DoctorSummary {
+        codex: CodexSourceSummary {
+            source: "codex_local",
+            status: inspection.status,
+            discovery,
+            codex_home: home.display().to_string(),
+            rollout_files: inspection.rollout_files,
+            supported_rollout_files: inspection.supported_rollout_files,
+            usage_events: inspection.usage_events,
+        },
+    };
+    if global.json {
+        render_json_success("doctor", summary, inspection.warnings, stdout)
+    } else if global.quiet {
+        Ok(())
+    } else {
+        writeln!(stdout, "Codex source: {}", summary.codex.status.as_str())
+            .map_err(output_failure)?;
+        writeln!(
+            stdout,
+            "  Home: {} ({})",
+            summary.codex.codex_home, summary.codex.discovery
+        )
+        .map_err(output_failure)?;
+        writeln!(
+            stdout,
+            "  Rollouts: {} total, {} supported",
+            summary.codex.rollout_files, summary.codex.supported_rollout_files
+        )
+        .map_err(output_failure)?;
+        writeln!(stdout, "  Usage events: {}", summary.codex.usage_events)
+            .map_err(output_failure)?;
+        for warning in inspection.warnings {
+            writeln!(stdout, "  Warning: {warning}").map_err(output_failure)?;
+        }
+        Ok(())
+    }
 }
 
 fn run_sources(
@@ -1279,18 +1335,16 @@ fn run_codex_inspection(
 fn codex_source_failure(error: CodexSourceError) -> CliFailure {
     match error {
         CodexSourceError::SessionsUnavailable => CliFailure::new(
-            EXIT_INVALID_INPUT,
+            EXIT_FILE_IO,
             "codex_sessions_unavailable",
             error.to_string(),
         ),
         CodexSourceError::Io(_) => {
             CliFailure::new(EXIT_FILE_IO, "codex_source_io", error.to_string())
         }
-        CodexSourceError::Malformed { .. } => CliFailure::new(
-            EXIT_INVALID_INPUT,
-            "codex_rollout_malformed",
-            error.to_string(),
-        ),
+        CodexSourceError::Malformed { .. } => {
+            CliFailure::new(EXIT_FILE_IO, "codex_rollout_malformed", error.to_string())
+        }
         CodexSourceError::Domain => {
             CliFailure::new(EXIT_INVALID_INPUT, "codex_usage_invalid", error.to_string())
         }
@@ -2554,6 +2608,38 @@ mod tests {
 
         assert!(before.global.json);
         assert!(after.global.json);
+    }
+
+    #[test]
+    fn codex_home_discovery_is_cross_platform_and_has_stable_precedence() {
+        let explicit = PathBuf::from("explicit-codex");
+        assert_eq!(
+            resolve_codex_home_values(
+                Some(&explicit),
+                Some(std::ffi::OsString::from("environment-codex")),
+                Some(std::ffi::OsString::from("platform-home")),
+            )
+            .map_err(|_| ())
+            .unwrap(),
+            (explicit, "command")
+        );
+        assert_eq!(
+            resolve_codex_home_values(
+                None,
+                Some(std::ffi::OsString::from("environment-codex")),
+                Some(std::ffi::OsString::from("platform-home")),
+            )
+            .map_err(|_| ())
+            .unwrap(),
+            (PathBuf::from("environment-codex"), "environment")
+        );
+        assert_eq!(
+            resolve_codex_home_values(None, None, Some(std::ffi::OsString::from("platform-home")),)
+                .map_err(|_| ())
+                .unwrap(),
+            (PathBuf::from("platform-home").join(".codex"), "default")
+        );
+        assert!(resolve_codex_home_values(None, None, None).is_err());
     }
 
     #[test]

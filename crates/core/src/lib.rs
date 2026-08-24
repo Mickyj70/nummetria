@@ -7,9 +7,11 @@
 pub const PRODUCT_NAME: &str = "nummetria";
 
 mod exchange;
+mod reporting;
 mod usage;
 
 pub use exchange::{ExchangeError, RecordValidationError, UsageExchange};
+pub use reporting::{GroupDimension, ReportCostTotal, ReportGroup, aggregate_records};
 pub use usage::{
     CollectionSource, Cost, CostEvidence, CurrencyCode, DomainError, ModelId, ProjectId,
     ProviderId, RecordId, TimeRange, UsageKind, UsageQuantity, UsageRecord,

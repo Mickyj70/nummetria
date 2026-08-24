@@ -50,6 +50,11 @@ contract and independent tests.
    records.
 3. Storage inserts records using deterministic identities and a transaction.
 4. A collection checkpoint advances only after the transaction commits.
+
+Local append-only sources may store versioned per-file byte offsets inside one
+checkpoint cursor. Resume state contains only the typed metadata needed to
+continue normalization. Explicit historical ranges bypass incremental state so
+filtered observations are never silently skipped.
 5. Reports query normalized data and retain cost-evidence labels.
 6. The CLI renders either human-readable output or a versioned JSON envelope.
 7. Subscription records remain separate from metered usage so reports never

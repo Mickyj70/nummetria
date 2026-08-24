@@ -487,6 +487,10 @@ struct CodexCollectSummary {
     observations_read: usize,
     records_inserted: usize,
     records_already_present: usize,
+    files_resumed: usize,
+    files_reset: usize,
+    lines_examined: usize,
+    checkpoint_advanced: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1123,27 +1127,66 @@ fn run_collect_codex(
         ));
     }
     let collected_at = DateTime::<Utc>::from(std::time::SystemTime::now());
+    let mut storage = open_database(global, context)?;
+    let provider = nummetria_core::ProviderId::new("openai")
+        .map_err(|error| CliFailure::new(EXIT_STORAGE, "storage_failure", error.to_string()))?;
+    let stream = "codex.local-rollouts:v1";
+    let incremental = start.is_none() && end.is_none();
+    let previous = if incremental {
+        storage
+            .get_checkpoint(&provider, stream)
+            .map_err(storage_failure)?
+    } else {
+        None
+    };
     // The source parser deserializes only metadata and numeric token counters. Unknown
     // content fields are skipped and are never retained in memory or normalized records.
-    let batch = codex::collect(&home, start, end, collected_at).map_err(codex_source_failure)?;
+    let batch = codex::collect_incremental(
+        &home,
+        start,
+        end,
+        collected_at,
+        previous
+            .as_ref()
+            .map(|checkpoint| checkpoint.cursor.as_str()),
+    )
+    .map_err(codex_source_failure)?;
     let observations_read = batch.records.len();
-    let mut storage = open_database(global, context)?;
-    let inserted = storage
-        .insert_usage_records(&batch.records)
-        .map_err(storage_failure)?;
+    let checkpoint_advanced = batch.checkpoint.is_some();
+    let inserted = if let Some(cursor) = batch.checkpoint.as_ref() {
+        storage
+            .insert_usage_records_with_checkpoints(
+                &batch.records,
+                &[CollectionCheckpoint {
+                    provider,
+                    stream: stream.into(),
+                    cursor: cursor.clone(),
+                    updated_at: collected_at,
+                }],
+            )
+            .map_err(storage_failure)?
+    } else {
+        storage
+            .insert_usage_records(&batch.records)
+            .map_err(storage_failure)?
+    };
     let summary = CodexCollectSummary {
         source: "codex_local",
         files_scanned: batch.files_scanned,
         observations_read,
         records_inserted: inserted.inserted,
         records_already_present: inserted.already_present,
+        files_resumed: batch.files_resumed,
+        files_reset: batch.files_reset,
+        lines_examined: batch.lines_examined,
+        checkpoint_advanced,
     };
     if global.json {
         render_json_success("collect", summary, batch.warnings, stdout)
     } else if global.quiet {
         Ok(())
     } else {
-        writeln!(stdout, "Collected local Codex usage: {} file(s), {} observation(s), {} inserted, {} already present.", summary.files_scanned, summary.observations_read, summary.records_inserted, summary.records_already_present).map_err(output_failure)?;
+        writeln!(stdout, "Collected local Codex usage: {} file(s), {} resumed, {} reset, {} line(s) examined, {} observation(s), {} inserted, {} already present.", summary.files_scanned, summary.files_resumed, summary.files_reset, summary.lines_examined, summary.observations_read, summary.records_inserted, summary.records_already_present).map_err(output_failure)?;
         for warning in batch.warnings {
             writeln!(stdout, "Warning: {warning}").map_err(output_failure)?;
         }

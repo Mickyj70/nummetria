@@ -392,6 +392,7 @@ fn read_rollout(
             Err(_) if !complete => {
                 warnings.push(format!("ignored incomplete final line in {relative}"));
                 offset = line_start;
+                line_number -= 1;
                 break;
             }
             Err(_) => {
@@ -639,5 +640,68 @@ mod tests {
         assert_eq!(historical.files_resumed, 0);
         assert_eq!(historical.lines_examined, 4);
         assert!(historical.checkpoint.is_none());
+    }
+
+    #[test]
+    fn invalid_checkpoint_falls_back_without_exposing_it() {
+        let home = tempdir().unwrap();
+        let sessions = home.path().join("sessions");
+        fs::create_dir(&sessions).unwrap();
+        let mut file = File::create(sessions.join("rollout-test.jsonl")).unwrap();
+        writeln!(file, r#"{{"timestamp":"2026-08-23T10:00:00Z","type":"session_meta","payload":{{"id":"session-1"}}}}"#).unwrap();
+        writeln!(file, r#"{{"timestamp":"2026-08-23T10:00:01Z","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":1}}}}}}}}"#).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 8, 23, 11, 0, 0).unwrap();
+        let batch =
+            collect_incremental(home.path(), None, None, now, Some("SECRET_CANARY")).unwrap();
+        assert_eq!(batch.records.len(), 1);
+        assert_eq!(batch.warnings.len(), 1);
+        assert!(!format!("{batch:?}").contains("SECRET_CANARY"));
+    }
+
+    #[test]
+    fn incomplete_line_is_retried_after_it_becomes_complete() {
+        let home = tempdir().unwrap();
+        let sessions = home.path().join("sessions");
+        fs::create_dir(&sessions).unwrap();
+        let path = sessions.join("rollout-test.jsonl");
+        let mut file = File::create(&path).unwrap();
+        writeln!(file, r#"{{"timestamp":"2026-08-23T10:00:00Z","type":"session_meta","payload":{{"id":"session-1"}}}}"#).unwrap();
+        write!(file, r#"{{"timestamp":"2026-08-23T10:00:01Z","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":7"#).unwrap();
+        drop(file);
+        let now = Utc.with_ymd_and_hms(2026, 8, 23, 11, 0, 0).unwrap();
+        let first = collect_incremental(home.path(), None, None, now, None).unwrap();
+        assert!(first.records.is_empty());
+        assert_eq!(first.warnings.len(), 1);
+
+        let mut file = OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(file, "}}}}}}}}").unwrap();
+        let second =
+            collect_incremental(home.path(), None, None, now, first.checkpoint.as_deref()).unwrap();
+        assert_eq!(second.records.len(), 1);
+        assert_eq!(second.files_resumed, 1);
+    }
+
+    #[test]
+    fn replaced_rollout_resets_and_recollects_safely() {
+        let home = tempdir().unwrap();
+        let sessions = home.path().join("sessions");
+        fs::create_dir(&sessions).unwrap();
+        let path = sessions.join("rollout-test.jsonl");
+        let mut file = File::create(&path).unwrap();
+        writeln!(file, r#"{{"timestamp":"2026-08-23T10:00:00Z","type":"session_meta","payload":{{"id":"old-session"}}}}"#).unwrap();
+        writeln!(file, r#"{{"timestamp":"2026-08-23T10:00:01Z","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":1}}}}}}}}"#).unwrap();
+        drop(file);
+        let now = Utc.with_ymd_and_hms(2026, 8, 23, 11, 0, 0).unwrap();
+        let first = collect_incremental(home.path(), None, None, now, None).unwrap();
+
+        let mut file = File::create(path).unwrap();
+        writeln!(file, r#"{{"timestamp":"2026-08-23T10:00:00Z","type":"session_meta","payload":{{"id":"new-session"}}}}"#).unwrap();
+        writeln!(file, r#"{{"timestamp":"2026-08-23T10:00:02Z","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":2}}}}}}}}"#).unwrap();
+        drop(file);
+        let second =
+            collect_incremental(home.path(), None, None, now, first.checkpoint.as_deref()).unwrap();
+        assert_eq!(second.files_reset, 1);
+        assert_eq!(second.records.len(), 1);
+        assert!(second.records[0].id.as_str().contains("new-session"));
     }
 }

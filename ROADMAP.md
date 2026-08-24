@@ -14,7 +14,8 @@ a focused pull request with tests and documentation.
 - [x] Cross-platform configuration and native credential storage.
 - [x] OpenAI provider adapter.
 - [x] Anthropic provider adapter.
-- [ ] Privacy-reviewed local Codex and Claude Code sources.
+- [x] Privacy-reviewed local Codex source.
+- [ ] Privacy-reviewed local Claude Code source.
 - [ ] Usage reports and local budgets.
 - [ ] Manual subscription renewal tracking.
 - [ ] Explainable local usage anomaly detection.

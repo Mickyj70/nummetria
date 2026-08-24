@@ -25,3 +25,4 @@ concept. Small changes can teach directly through the PR description instead.
 5. [Cross-platform configuration without leaking secrets](005-platform-configuration.md)
 6. [Normalize a provider API without inventing data](006-openai-provider.md)
 7. [Prove a core is provider-neutral with a second adapter](007-anthropic-provider.md)
+8. [Read local usage without collecting conversation content](008-local-codex-source.md)

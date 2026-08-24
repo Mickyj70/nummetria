@@ -44,3 +44,5 @@ releases begin.
 - Anthropic Admin API credential management plus paginated Messages usage and
   cost collection with cache and web-search normalization, sanitized failures,
   deterministic records, and atomic checkpoints.
+- Privacy-reviewed local Codex detection, status, incremental token collection,
+  append-safe checkpoints, sanitized diagnostics, and `doctor` integration.

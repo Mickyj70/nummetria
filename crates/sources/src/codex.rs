@@ -626,5 +626,18 @@ mod tests {
         assert_eq!(third.records.len(), 1);
         assert_eq!(third.files_resumed, 1);
         assert_eq!(third.lines_examined, 1);
+
+        let historical = collect_incremental(
+            home.path(),
+            Some(Utc.with_ymd_and_hms(2026, 8, 23, 0, 0, 0).unwrap()),
+            None,
+            now,
+            third.checkpoint.as_deref(),
+        )
+        .unwrap();
+        assert_eq!(historical.records.len(), 2);
+        assert_eq!(historical.files_resumed, 0);
+        assert_eq!(historical.lines_examined, 4);
+        assert!(historical.checkpoint.is_none());
     }
 }

@@ -37,6 +37,34 @@ path order and emits records in event timestamp and identity order. A partially
 written trailing JSON line is ignored with a warning so collection can safely
 run while Codex is active.
 
+## Incremental collection
+
+An unbounded `collect codex` run uses a versioned SQLite checkpoint to resume
+each rollout at its last complete JSONL byte boundary. The checkpoint stores
+only the relative rollout name, byte offset, line number, session identity, and
+last model metadata required to normalize appended events. It never stores an
+absolute Codex path or any prompt, response, tool, reasoning, or shell content.
+
+Before resuming, Nummetria verifies the rollout's typed session header. A
+missing, truncated, replaced, or mismatched file is safely read again from its
+beginning; SQLite idempotency prevents duplicate records. A partial trailing
+line is not included in the offset and is retried on the next collection.
+Files absent from the current source are removed from the next checkpoint.
+
+Explicit `--start` or `--end` collection is a historical query: it performs a
+full scan and does not read or advance the incremental checkpoint. This avoids
+marking filtered-out observations as consumed.
+
+Usage records and the new checkpoint commit in one SQLite transaction. A
+malformed rollout, invalid observation, storage conflict, or failed checkpoint
+write leaves both records and the previous checkpoint unchanged. Invalid or
+unsupported checkpoint JSON fails closed to a full rescan with a sanitized
+warning.
+
+Collection summaries report rollout files discovered, files resumed, files
+reset, complete lines examined, usage observations read, records inserted, and
+records already present. These counters contain no source content.
+
 ## Normalization
 
 Each non-empty `last_token_usage` event becomes one immutable observation.
@@ -72,6 +100,7 @@ file.
 - Malformed completed lines produce relative, line-numbered errors without
   reproducing content.
 - Invalid records leave Nummetria SQLite unchanged.
+- Checkpoints advance only after every selected rollout is read successfully.
 - Local source errors use exit `3`; Nummetria storage errors use exit `4`.
 
 A new Codex layout requires a sanitized fixture, documentation update, and

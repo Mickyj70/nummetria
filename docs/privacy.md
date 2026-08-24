@@ -9,6 +9,10 @@ collector of sensitive AI conversations.
 - Usage quantities such as tokens, requests, images, or compute time.
 - Cost values, currencies, and evidence classification.
 - Collection timestamps, source references, and synchronization checkpoints.
+
+Local-source checkpoints may contain relative file names, byte offsets, line
+numbers, session identifiers, and model names. They never contain absolute
+source paths or copied prompt, response, reasoning, tool, or shell content.
 - Budgets and non-secret user preferences.
 
 ## Data Nummetria must not store

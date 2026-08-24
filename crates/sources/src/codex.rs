@@ -50,6 +50,7 @@ struct CodexCursor {
 struct FileCursor {
     offset: u64,
     line_number: usize,
+    header_id: String,
     session_id: String,
     model: Option<String>,
 }
@@ -354,7 +355,7 @@ fn read_rollout(
     let length = file.metadata().map_err(CodexSourceError::Io)?.len();
     let header_session = read_header_session(path)?;
     let can_resume = previous.is_some_and(|cursor| {
-        cursor.offset <= length && Some(cursor.session_id.as_str()) == header_session.as_deref()
+        cursor.offset <= length && Some(cursor.header_id.as_str()) == header_session.as_deref()
     });
     let reset = previous.is_some() && !can_resume;
     let mut reader = BufReader::new(file);
@@ -434,11 +435,14 @@ fn read_rollout(
         resumed: can_resume,
         reset,
         lines_examined,
-        cursor: session_id.map(|session_id| FileCursor {
-            offset,
-            line_number,
-            session_id,
-            model,
+        cursor: session_id.and_then(|session_id| {
+            header_session.map(|header_id| FileCursor {
+                offset,
+                line_number,
+                header_id,
+                session_id,
+                model,
+            })
         }),
     })
 }

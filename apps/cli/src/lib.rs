@@ -5,8 +5,9 @@ use std::process::ExitCode;
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc};
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use nummetria_core::{
-    CollectionSource, Cost, CostEvidence, ExchangeError, GroupDimension, RecordValidationError,
-    ReportGroup, UsageExchange, UsageKind, UsageRecord, aggregate_records,
+    Budget, BudgetFilters, BudgetPeriod as CoreBudgetPeriod, CollectionSource, Cost, CostEvidence,
+    CurrencyCode, ExchangeError, GroupDimension, ModelId, ProjectId, ProviderId,
+    RecordValidationError, ReportGroup, UsageExchange, UsageKind, UsageRecord, aggregate_records,
 };
 use nummetria_platform::{
     ConfigError, ConfigSource, CredentialId, EnvironmentOverrides, KeyringSecretStore,
@@ -309,6 +310,58 @@ pub struct UsageReportArgs {
 }
 
 #[derive(Debug, clap::Args)]
+pub struct BudgetArgs {
+    #[command(subcommand)]
+    pub command: BudgetCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BudgetCommand {
+    /// Create a named local budget definition.
+    Create(BudgetCreateArgs),
+    /// List local budget definitions.
+    List,
+    /// Check one or every local budget.
+    Check {
+        name: Option<String>,
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        at: Option<String>,
+    },
+    /// Delete a local budget definition.
+    Delete {
+        name: String,
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum BudgetPeriodArg {
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct BudgetCreateArgs {
+    pub name: String,
+    #[arg(long)]
+    pub amount: String,
+    #[arg(long)]
+    pub currency: String,
+    #[arg(long, value_enum)]
+    pub period: BudgetPeriodArg,
+    #[arg(long)]
+    pub provider: Option<String>,
+    #[arg(long)]
+    pub model: Option<String>,
+    #[arg(long)]
+    pub project: Option<String>,
+    #[arg(long)]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
 pub struct SourcesArgs {
     #[command(subcommand)]
     pub command: SourcesCommand,
@@ -379,7 +432,7 @@ pub enum Command {
     /// Discover and inspect opt-in local usage sources.
     Sources(SourcesArgs),
     /// Create and check local budgets.
-    Budget,
+    Budget(BudgetArgs),
     /// Validate and store an exchange file.
     Import(ImportArgs),
     /// Export normalized usage as JSON or CSV.
@@ -557,6 +610,17 @@ struct UsageReportSummary {
     end: Option<String>,
     group_by: &'static str,
     groups: Vec<ReportGroup>,
+}
+
+#[derive(Debug, Serialize)]
+struct BudgetListSummary {
+    budgets: Vec<Budget>,
+}
+
+#[derive(Debug, Serialize)]
+struct BudgetDeleteSummary {
+    name: String,
+    deleted: bool,
 }
 
 struct ReportRange {
@@ -764,6 +828,7 @@ fn run_with_io(
         Command::Usage(args) => run_usage(&cli.global, args, context, stdout),
         Command::Export(args) => run_export(&cli.global, args, context, stdout),
         Command::Doctor => run_doctor(&cli.global, stdout),
+        Command::Budget(args) => run_budget(&cli.global, args, context, stdin, stdout),
         _ => Err(CliFailure::new(
             EXIT_INVALID_INPUT,
             "not_implemented",
@@ -2072,6 +2137,214 @@ fn run_usage(
     }
 }
 
+fn run_budget(
+    global: &GlobalOptions,
+    args: &BudgetArgs,
+    context: &RuntimeContext,
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    match &args.command {
+        BudgetCommand::Create(args) => run_budget_create(global, args, context, stdout),
+        BudgetCommand::List => run_budget_list(global, context, stdout),
+        BudgetCommand::Delete { name, yes } => {
+            run_budget_delete(global, name, *yes, context, stdin, stdout)
+        }
+        BudgetCommand::Check { .. } => Err(CliFailure::new(
+            EXIT_INVALID_INPUT,
+            "not_implemented",
+            "budget check lands in the next reporting checkpoint",
+        )),
+    }
+}
+
+fn run_budget_create(
+    global: &GlobalOptions,
+    args: &BudgetCreateArgs,
+    context: &RuntimeContext,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    let amount = args.amount.parse::<Decimal>().map_err(|_| {
+        CliFailure::new(
+            EXIT_INVALID_INPUT,
+            "invalid_budget_amount",
+            "budget amount must be an exact decimal greater than zero",
+        )
+    })?;
+    let currency = CurrencyCode::new(args.currency.clone()).map_err(|error| {
+        CliFailure::new(EXIT_INVALID_INPUT, "invalid_currency", error.to_string())
+    })?;
+    let filters = BudgetFilters {
+        provider: args
+            .provider
+            .clone()
+            .map(ProviderId::new)
+            .transpose()
+            .map_err(|error| {
+                CliFailure::new(EXIT_INVALID_INPUT, "invalid_provider", error.to_string())
+            })?,
+        model: args
+            .model
+            .clone()
+            .map(ModelId::new)
+            .transpose()
+            .map_err(|error| {
+                CliFailure::new(EXIT_INVALID_INPUT, "invalid_model", error.to_string())
+            })?,
+        project: args
+            .project
+            .clone()
+            .map(ProjectId::new)
+            .transpose()
+            .map_err(|error| {
+                CliFailure::new(EXIT_INVALID_INPUT, "invalid_project", error.to_string())
+            })?,
+        source: args.source.clone(),
+    };
+    let period = match args.period {
+        BudgetPeriodArg::Daily => CoreBudgetPeriod::Daily,
+        BudgetPeriodArg::Weekly => CoreBudgetPeriod::Weekly,
+        BudgetPeriodArg::Monthly => CoreBudgetPeriod::Monthly,
+    };
+    let budget = Budget::new(
+        args.name.clone(),
+        amount,
+        currency,
+        period,
+        filters,
+        DateTime::<Utc>::from(std::time::SystemTime::now()),
+    )
+    .map_err(|error| CliFailure::new(EXIT_INVALID_INPUT, "invalid_budget", error.to_string()))?;
+    let mut storage = open_database(global, context)?;
+    storage
+        .create_budget(&budget)
+        .map_err(|error| match error {
+            StorageError::BudgetExists { .. } => {
+                CliFailure::new(EXIT_INVALID_INPUT, "budget_exists", error.to_string())
+            }
+            other => storage_failure(other),
+        })?;
+    if global.json {
+        render_json_success("budget", budget, Vec::new(), stdout)
+    } else if global.quiet {
+        Ok(())
+    } else {
+        writeln!(
+            stdout,
+            "Created budget '{}' at {} {} per {}.",
+            budget.name,
+            budget.amount,
+            budget.currency.as_str(),
+            budget.period.as_str()
+        )
+        .map_err(output_failure)
+    }
+}
+
+fn run_budget_list(
+    global: &GlobalOptions,
+    context: &RuntimeContext,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    let storage = open_database(global, context)?;
+    let budgets = storage.list_budgets().map_err(storage_failure)?;
+    if global.json {
+        render_json_success("budget", BudgetListSummary { budgets }, Vec::new(), stdout)
+    } else if budgets.is_empty() {
+        writeln!(stdout, "No budgets configured.").map_err(output_failure)
+    } else {
+        for budget in budgets {
+            let mut filters = Vec::new();
+            if let Some(value) = budget.filters.provider {
+                filters.push(format!("provider={}", value.as_str()));
+            }
+            if let Some(value) = budget.filters.model {
+                filters.push(format!("model={}", value.as_str()));
+            }
+            if let Some(value) = budget.filters.project {
+                filters.push(format!("project={}", value.as_str()));
+            }
+            if let Some(value) = budget.filters.source {
+                filters.push(format!("source={value}"));
+            }
+            let suffix = if filters.is_empty() {
+                "all usage".into()
+            } else {
+                filters.join(", ")
+            };
+            writeln!(
+                stdout,
+                "{}: {} {} / {} ({suffix})",
+                budget.name,
+                budget.currency.as_str(),
+                budget.amount,
+                budget.period.as_str()
+            )
+            .map_err(output_failure)?;
+        }
+        Ok(())
+    }
+}
+
+fn run_budget_delete(
+    global: &GlobalOptions,
+    name: &str,
+    yes: bool,
+    context: &RuntimeContext,
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn Write,
+) -> Result<(), CliFailure> {
+    if global.json && !yes {
+        return Err(CliFailure::new(
+            EXIT_INVALID_INPUT,
+            "confirmation_required",
+            "--json budget deletion requires --yes",
+        ));
+    }
+    if !yes {
+        write!(
+            stdout,
+            "Delete budget '{name}'? Type 'delete' to continue: "
+        )
+        .map_err(output_failure)?;
+        stdout.flush().map_err(output_failure)?;
+        let mut confirmation = String::new();
+        stdin.read_line(&mut confirmation).map_err(|error| {
+            CliFailure::new(
+                EXIT_FILE_IO,
+                "input_io",
+                format!("could not read confirmation: {error}"),
+            )
+        })?;
+        if confirmation.trim() != "delete" {
+            return Err(CliFailure::new(
+                EXIT_INVALID_INPUT,
+                "confirmation_required",
+                "budget deletion cancelled",
+            ));
+        }
+    }
+    let mut storage = open_database(global, context)?;
+    if !storage.delete_budget(name).map_err(storage_failure)? {
+        return Err(CliFailure::new(
+            EXIT_INVALID_INPUT,
+            "budget_not_found",
+            format!("budget '{name}' does not exist"),
+        ));
+    }
+    let summary = BudgetDeleteSummary {
+        name: name.into(),
+        deleted: true,
+    };
+    if global.json {
+        render_json_success("budget", summary, Vec::new(), stdout)
+    } else if global.quiet {
+        Ok(())
+    } else {
+        writeln!(stdout, "Deleted budget '{name}'.").map_err(output_failure)
+    }
+}
+
 fn run_usage_list(
     global: &GlobalOptions,
     context: &RuntimeContext,
@@ -2557,7 +2830,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Usage(_) => "usage",
         Command::Providers(_) => "providers",
         Command::Sources(_) => "sources",
-        Command::Budget => "budget",
+        Command::Budget(_) => "budget",
         Command::Import(_) => "import",
         Command::Export(_) => "export",
         Command::Config(_) => "config",
@@ -2575,12 +2848,12 @@ fn command_uses_configuration(command: &Command) -> bool {
         | Command::Export(_)
         | Command::Config(_)
         | Command::Data(_)
-        | Command::Collect(_) => true,
+        | Command::Collect(_)
+        | Command::Budget(_) => true,
         Command::Import(args) => !args.dry_run,
         Command::Setup
         | Command::Providers(_)
         | Command::Sources(_)
-        | Command::Budget
         | Command::Doctor
         | Command::Completion
         | Command::Version => false,
@@ -2798,7 +3071,7 @@ mod tests {
             &["nummetria", "providers", "anthropic", "status"],
             &["nummetria", "sources", "codex", "detect"],
             &["nummetria", "sources", "codex", "status"],
-            &["nummetria", "budget"],
+            &["nummetria", "budget", "list"],
             &["nummetria", "import", "usage.json"],
             &["nummetria", "export", "--format", "json"],
             &["nummetria", "config", "show"],
@@ -3459,6 +3732,88 @@ mod tests {
             "1250"
         );
         assert_eq!(report["data"]["groups"][0]["costs"][0]["amount"], "0.03125");
+    }
+
+    #[test]
+    fn budget_definitions_support_safe_cli_lifecycle() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("usage.db");
+        let database = database.to_str().unwrap();
+        let create = [
+            "nummetria",
+            "--database",
+            database,
+            "budget",
+            "create",
+            "openai-monthly",
+            "--amount",
+            "25.125",
+            "--currency",
+            "USD",
+            "--period",
+            "monthly",
+            "--provider",
+            "openai",
+            "--source",
+            "provider_api",
+        ];
+        let (success, output, error) = run(&create);
+        assert!(success, "{error}");
+        assert!(output.contains("25.125 USD"));
+
+        let (success, output, error) = run(&[
+            "nummetria",
+            "--database",
+            database,
+            "--json",
+            "budget",
+            "list",
+        ]);
+        assert!(success, "{error}");
+        let output: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(output["data"]["budgets"][0]["name"], "openai-monthly");
+        assert_eq!(output["data"]["budgets"][0]["amount"], "25.125");
+        assert_eq!(
+            output["data"]["budgets"][0]["filters"]["provider"],
+            "openai"
+        );
+
+        assert!(!run(&create).0);
+        assert!(
+            !run(&[
+                "nummetria",
+                "--database",
+                database,
+                "--json",
+                "budget",
+                "delete",
+                "openai-monthly"
+            ])
+            .0
+        );
+        assert!(
+            run(&[
+                "nummetria",
+                "--database",
+                database,
+                "--json",
+                "budget",
+                "delete",
+                "openai-monthly",
+                "--yes"
+            ])
+            .0
+        );
+        let (_, output, _) = run(&[
+            "nummetria",
+            "--database",
+            database,
+            "--json",
+            "budget",
+            "list",
+        ]);
+        let output: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(output["data"]["budgets"].as_array().unwrap().len(), 0);
     }
 
     #[test]

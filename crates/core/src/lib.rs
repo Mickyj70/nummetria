@@ -6,10 +6,12 @@
 /// The product name used by every Nummetria surface.
 pub const PRODUCT_NAME: &str = "nummetria";
 
+mod budget;
 mod exchange;
 mod reporting;
 mod usage;
 
+pub use budget::{Budget, BudgetError, BudgetFilters, BudgetPeriod};
 pub use exchange::{ExchangeError, RecordValidationError, UsageExchange};
 pub use reporting::{GroupDimension, ReportCostTotal, ReportGroup, aggregate_records};
 pub use usage::{

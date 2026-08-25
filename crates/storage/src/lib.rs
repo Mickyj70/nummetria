@@ -4,19 +4,22 @@
 //! transactional, repeated identical records are idempotent, and a reused
 //! record ID with different contents is reported as a conflict.
 
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, path::Path, str::FromStr};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use nummetria_core::{
-    Cost, CostEvidence, CurrencyCode, ModelId, ProjectId, ProviderId, RecordId, UsageKind,
-    UsageRecord,
+    Budget, BudgetFilters, BudgetPeriod, Cost, CostEvidence, CurrencyCode, ModelId, ProjectId,
+    ProviderId, RecordId, UsageKind, UsageRecord,
 };
 use rusqlite::{Connection, MAIN_DB, OptionalExtension, params, params_from_iter, types::Value};
 use rust_decimal::Decimal;
 use thiserror::Error;
 
-const LATEST_SCHEMA_VERSION: u32 = 1;
-const MIGRATIONS: &[(u32, &str)] = &[(1, include_str!("../migrations/0001_initial.sql"))];
+const LATEST_SCHEMA_VERSION: u32 = 2;
+const MIGRATIONS: &[(u32, &str)] = &[
+    (1, include_str!("../migrations/0001_initial.sql")),
+    (2, include_str!("../migrations/0002_budgets.sql")),
+];
 
 /// Failures from opening, migrating, reading, or writing Nummetria's database.
 #[derive(Debug, Error)]
@@ -33,6 +36,10 @@ pub enum StorageError {
     InvalidQueryRange,
     #[error("checkpoint stream cannot be empty")]
     EmptyCheckpointStream,
+    #[error("budget '{name}' already exists")]
+    BudgetExists { name: String },
+    #[error("stored budget is invalid: {0}")]
+    InvalidBudget(String),
     #[error("backup destination already exists: {0}")]
     BackupDestinationExists(String),
 }
@@ -128,6 +135,56 @@ impl SqliteStorage {
         Ok(self
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))?)
+    }
+
+    pub fn create_budget(&mut self, budget: &Budget) -> Result<(), StorageError> {
+        let result = self.connection.execute(
+            "INSERT INTO budgets (name, amount, currency, period, provider, model, project, source, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![budget.name, budget.amount.to_string(), budget.currency.as_str(), budget.period.as_str(), budget.filters.provider.as_ref().map(ProviderId::as_str), budget.filters.model.as_ref().map(ModelId::as_str), budget.filters.project.as_ref().map(ProjectId::as_str), budget.filters.source, timestamp(budget.created_at)],
+        );
+        match result {
+            Ok(_) => Ok(()),
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(StorageError::BudgetExists {
+                    name: budget.name.clone(),
+                })
+            }
+            Err(error) => Err(StorageError::Database(error)),
+        }
+    }
+
+    pub fn list_budgets(&self) -> Result<Vec<Budget>, StorageError> {
+        let mut statement = self.connection.prepare("SELECT name, amount, currency, period, provider, model, project, source, created_at FROM budgets ORDER BY name")?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, String>(8)?,
+            ))
+        })?;
+        rows.map(|row| budget_from_columns(row?)).collect()
+    }
+
+    pub fn get_budget(&self, name: &str) -> Result<Option<Budget>, StorageError> {
+        Ok(self
+            .list_budgets()?
+            .into_iter()
+            .find(|budget| budget.name == name))
+    }
+
+    pub fn delete_budget(&mut self, name: &str) -> Result<bool, StorageError> {
+        Ok(self
+            .connection
+            .execute("DELETE FROM budgets WHERE name = ?1", [name])?
+            > 0)
     }
 
     pub fn insert_usage_record(
@@ -424,6 +481,56 @@ fn migrate(connection: &mut Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
+type BudgetColumns = (
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+);
+
+fn budget_from_columns(columns: BudgetColumns) -> Result<Budget, StorageError> {
+    let (name, amount, currency, period, provider, model, project, source, created_at) = columns;
+    let amount = Decimal::from_str(&amount)
+        .map_err(|error| StorageError::InvalidBudget(error.to_string()))?;
+    let currency = CurrencyCode::new(currency)
+        .map_err(|error| StorageError::InvalidBudget(error.to_string()))?;
+    let period = match period.as_str() {
+        "daily" => BudgetPeriod::Daily,
+        "weekly" => BudgetPeriod::Weekly,
+        "monthly" => BudgetPeriod::Monthly,
+        _ => return Err(StorageError::InvalidBudget("unsupported period".into())),
+    };
+    let filters = BudgetFilters {
+        provider: provider
+            .map(ProviderId::new)
+            .transpose()
+            .map_err(|error| StorageError::InvalidBudget(error.to_string()))?,
+        model: model
+            .map(ModelId::new)
+            .transpose()
+            .map_err(|error| StorageError::InvalidBudget(error.to_string()))?,
+        project: project
+            .map(ProjectId::new)
+            .transpose()
+            .map_err(|error| StorageError::InvalidBudget(error.to_string()))?,
+        source,
+    };
+    Budget::new(
+        name,
+        amount,
+        currency,
+        period,
+        filters,
+        parse_timestamp(&created_at)?,
+    )
+    .map_err(|error| StorageError::InvalidBudget(error.to_string()))
+}
+
 fn insert_record(
     transaction: &rusqlite::Transaction<'_>,
     record: &UsageRecord,
@@ -605,11 +712,57 @@ mod tests {
         let path = directory.path().join("usage.db");
 
         let storage = SqliteStorage::open(&path).unwrap();
-        assert_eq!(storage.schema_version().unwrap(), 1);
+        assert_eq!(storage.schema_version().unwrap(), 2);
         drop(storage);
 
         let reopened = SqliteStorage::open(&path).unwrap();
-        assert_eq!(reopened.schema_version().unwrap(), 1);
+        assert_eq!(reopened.schema_version().unwrap(), 2);
+    }
+
+    #[test]
+    fn migrates_an_existing_v1_database_to_budget_schema() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("v1.db");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(MIGRATIONS[0].1).unwrap();
+        connection.pragma_update(None, "user_version", 1).unwrap();
+        drop(connection);
+
+        let storage = SqliteStorage::open(&path).unwrap();
+        assert_eq!(storage.schema_version().unwrap(), 2);
+        assert!(storage.list_budgets().unwrap().is_empty());
+    }
+
+    #[test]
+    fn budget_crud_preserves_exact_values_and_unique_names() {
+        let mut storage = SqliteStorage::open_in_memory().unwrap();
+        let budget = Budget::new(
+            "monthly-openai",
+            Decimal::from_str("25.125").unwrap(),
+            CurrencyCode::new("USD").unwrap(),
+            BudgetPeriod::Monthly,
+            BudgetFilters {
+                provider: Some(ProviderId::new("openai").unwrap()),
+                source: Some("provider_api".into()),
+                ..BudgetFilters::default()
+            },
+            instant(17, 1),
+        )
+        .unwrap();
+
+        storage.create_budget(&budget).unwrap();
+        assert_eq!(
+            storage.get_budget("monthly-openai").unwrap(),
+            Some(budget.clone())
+        );
+        assert!(matches!(
+            storage.create_budget(&budget),
+            Err(StorageError::BudgetExists { .. })
+        ));
+        assert_eq!(storage.list_budgets().unwrap(), vec![budget]);
+        assert!(!storage.delete_budget("missing").unwrap());
+        assert!(storage.delete_budget("monthly-openai").unwrap());
+        assert!(storage.list_budgets().unwrap().is_empty());
     }
 
     #[test]

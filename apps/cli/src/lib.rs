@@ -379,7 +379,7 @@ pub enum Command {
     /// Discover and inspect opt-in local usage sources.
     Sources(SourcesArgs),
     /// Create and check local budgets.
-    Budget,
+    Budget(BudgetArgs),
     /// Validate and store an exchange file.
     Import(ImportArgs),
     /// Export normalized usage as JSON or CSV.
@@ -764,6 +764,7 @@ fn run_with_io(
         Command::Usage(args) => run_usage(&cli.global, args, context, stdout),
         Command::Export(args) => run_export(&cli.global, args, context, stdout),
         Command::Doctor => run_doctor(&cli.global, stdout),
+        Command::Budget(args) => run_budget(&cli.global, args, context, stdin, stdout),
         _ => Err(CliFailure::new(
             EXIT_INVALID_INPUT,
             "not_implemented",
@@ -2557,7 +2558,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Usage(_) => "usage",
         Command::Providers(_) => "providers",
         Command::Sources(_) => "sources",
-        Command::Budget => "budget",
+        Command::Budget(_) => "budget",
         Command::Import(_) => "import",
         Command::Export(_) => "export",
         Command::Config(_) => "config",
@@ -2575,12 +2576,12 @@ fn command_uses_configuration(command: &Command) -> bool {
         | Command::Export(_)
         | Command::Config(_)
         | Command::Data(_)
-        | Command::Collect(_) => true,
+        | Command::Collect(_)
+        | Command::Budget(_) => true,
         Command::Import(args) => !args.dry_run,
         Command::Setup
         | Command::Providers(_)
         | Command::Sources(_)
-        | Command::Budget
         | Command::Doctor
         | Command::Completion
         | Command::Version => false,
@@ -2798,7 +2799,7 @@ mod tests {
             &["nummetria", "providers", "anthropic", "status"],
             &["nummetria", "sources", "codex", "detect"],
             &["nummetria", "sources", "codex", "status"],
-            &["nummetria", "budget"],
+            &["nummetria", "budget", "list"],
             &["nummetria", "import", "usage.json"],
             &["nummetria", "export", "--format", "json"],
             &["nummetria", "config", "show"],
